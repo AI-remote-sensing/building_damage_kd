@@ -60,7 +60,7 @@ if __name__ == '__main__':
         model_idxs.append(val_idxs)
         model_idxs.append(val_idxs)
 
-        snap_to_load = 'res50_loc_{}_0_best'.format(seed)
+        snap_to_load = 'res50_loc_{}_tuned_best'.format(seed)
 
         model = SeResNext50_Unet_Loc().cuda()
 
@@ -79,7 +79,7 @@ if __name__ == '__main__':
         model.eval()
         models.append(model)
 
-        snap_to_load = 'dpn92_loc_{}_0_best'.format(seed)
+        snap_to_load = 'dpn92_loc_{}_tuned_best'.format(seed)
 
         model = Dpn92_Unet_Loc().cuda()
 
@@ -98,7 +98,7 @@ if __name__ == '__main__':
         model.eval()
         models.append(model)
 
-        snap_to_load = 'se154_loc_{}_0_best'.format(seed)
+        snap_to_load = 'se154_loc_{}_1_best'.format(seed)
 
         model = SeNet154_Unet_Loc().cuda()
         
