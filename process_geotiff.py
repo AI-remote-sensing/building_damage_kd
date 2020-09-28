@@ -11,6 +11,7 @@ def image(path,band):
     band = dataset.GetRasterBand(band)
     nXSize = dataset.RasterXSize #列数
     nYSize = dataset.RasterYSize #行数
+    
     data= band.ReadAsArray(0,0,nXSize,nYSize).astype(np.int)
     return data
 
@@ -53,6 +54,8 @@ if __name__=='__main__':
     parser.add_argument("-savepath", help="存储rgb文件的path", required=True)
     args = parser.parse_args()
     #file_path = '/data1/su/data/geotiffs/tier3/images/woolsey-fire_00000877_pre_disaster.tif'
+# %%
+# %%
     # use like following
     # python process_geotiff.py -geotiff /data1/su/data/geotiffs/tier3/images/woolsey-fire_00000877_pre_disaster.tif -savepath test.png
     get_figure(args.geotiff,args.savepath)

@@ -44,7 +44,7 @@ import gc
 cv2.setNumThreads(0)
 cv2.ocl.setUseOpenCL(False)
 
-train_dirs = ['train', 'tier3']
+train_dirs = ['train','test']
 
 models_folder = 'weights'
 
@@ -54,10 +54,15 @@ input_shape = (512, 512)
 
 
 all_files = []
+test_files = []
 for d in train_dirs:
     for f in sorted(listdir(path.join(d, 'images'))):
         if '_pre_disaster.png' in f:
-            all_files.append(path.join(d, 'images', f))
+            if d == 'test':
+                all_files.append(path.join(d, 'images', f))
+            else:
+                test_files.append(path.join(d, 'images', f))
+                
 
 
 class TrainData(Dataset):
@@ -265,7 +270,7 @@ class ValData(Dataset):
         img = cv2.imread(fn, cv2.IMREAD_COLOR)
         img2 = cv2.imread(fn.replace('_pre_disaster', '_post_disaster'), cv2.IMREAD_COLOR)
 
-        msk_loc = cv2.imread(path.join(loc_folder, '{0}.png'.format(fn.split('/')[-1].replace('.png', '_part1.png'))), cv2.IMREAD_UNCHANGED) > (0.3*255)
+        #msk_loc = cv2.imread(path.join(loc_folder, '{0}.png'.format(fn.split('/')[-1].replace('.png', '_part1.png'))), cv2.IMREAD_UNCHANGED) > (0.3*255)
 
         msk0 = cv2.imread(fn.replace('/images/', '/masks/'), cv2.IMREAD_UNCHANGED)
         lbl_msk1 = cv2.imread(fn.replace('/images/', '/masks/').replace('_pre_disaster', '_post_disaster'), cv2.IMREAD_UNCHANGED)
@@ -297,9 +302,59 @@ class ValData(Dataset):
         img = torch.from_numpy(img.transpose((2, 0, 1))).float()
         msk = torch.from_numpy(msk.transpose((2, 0, 1))).long()
 
-        sample = {'img': img, 'msk': msk, 'lbl_msk': lbl_msk, 'fn': fn, 'msk_loc': msk_loc}
+        sample = {'img': img, 'msk': msk, 'lbl_msk': lbl_msk, 'fn': fn, 'msk_loc': 0}
         return sample
 
+class TestData(Dataset):
+    def __init__(self, image_idxs):
+        super().__init__()
+        self.image_idxs = image_idxs
+
+    def __len__(self):
+        return len(self.image_idxs)
+
+    def __getitem__(self, idx):
+        _idx = self.image_idxs[idx]
+
+        fn = test_files[_idx]
+
+        img = cv2.imread(fn, cv2.IMREAD_COLOR)
+        img2 = cv2.imread(fn.replace('_pre_disaster', '_post_disaster'), cv2.IMREAD_COLOR)
+
+        #msk_loc = cv2.imread(path.join(loc_folder, '{0}.png'.format(fn.split('/')[-1].replace('.png', '_part1.png'))), cv2.IMREAD_UNCHANGED) > (0.3*255)
+
+        msk0 = cv2.imread(fn.replace('/images/', '/masks/'), cv2.IMREAD_UNCHANGED)
+        lbl_msk1 = cv2.imread(fn.replace('/images/', '/masks/').replace('_pre_disaster', '_post_disaster'), cv2.IMREAD_UNCHANGED)
+        msk1 = np.zeros_like(lbl_msk1)
+        msk2 = np.zeros_like(lbl_msk1)
+        msk3 = np.zeros_like(lbl_msk1)
+        msk4 = np.zeros_like(lbl_msk1)
+        msk1[lbl_msk1 == 1] = 255
+        msk2[lbl_msk1 == 2] = 255
+        msk3[lbl_msk1 == 3] = 255
+        msk4[lbl_msk1 == 4] = 255
+
+        msk0 = msk0[..., np.newaxis]
+        msk1 = msk1[..., np.newaxis]
+        msk2 = msk2[..., np.newaxis]
+        msk3 = msk3[..., np.newaxis]
+        msk4 = msk4[..., np.newaxis]
+
+        msk = np.concatenate([msk0, msk1, msk2, msk3, msk4], axis=2)
+        msk = (msk > 127)
+
+        msk = msk * 1
+
+        lbl_msk = msk[..., 1:].argmax(axis=2)
+        
+        img = np.concatenate([img, img2], axis=2)
+        img = preprocess_inputs(img)
+
+        img = torch.from_numpy(img.transpose((2, 0, 1))).float()
+        msk = torch.from_numpy(msk.transpose((2, 0, 1))).long()
+
+        sample = {'img': img, 'msk': msk, 'lbl_msk': lbl_msk, 'fn': fn, 'msk_loc': 0}
+        return sample
 
 def validate(net, data_loader):
     dices0 = []
@@ -308,23 +363,24 @@ def validate(net, data_loader):
     fp = np.zeros((5,))
     fn = np.zeros((5,))
 
-    _thr = 0.3
+    _thr = 0.5
 
     with torch.no_grad():
         for i, sample in enumerate(tqdm(data_loader)):
             msks = sample["msk"].numpy()
             lbl_msk = sample["lbl_msk"].numpy()
             imgs = sample["img"].cuda(non_blocking=True)
-            msk_loc = sample["msk_loc"].numpy() * 1
+            #msk_loc = sample["msk_loc"].numpy() * 1
             out = model(imgs)
 
-            msk_pred = msk_loc
+            #msk_pred = msk_loc
+            msk_pred = torch.sigmoid(out[:, 0, ...]).cpu().numpy()
             msk_damage_pred = torch.softmax(out, dim=1).cpu().numpy()[:, 1:, ...]
             
             for j in range(msks.shape[0]):
                 tp[4] += np.logical_and(msks[j, 0] > 0, msk_pred[j] > 0).sum()
-                fn[4] += np.logical_and(msks[j, 0] < 1, msk_pred[j] > 0).sum()
-                fp[4] += np.logical_and(msks[j, 0] > 0, msk_pred[j] < 1).sum()
+                fp[4] += np.logical_and(msks[j, 0] < 1, msk_pred[j] > 0).sum()
+                fn[4] += np.logical_and(msks[j, 0] > 0, msk_pred[j] < 1).sum()
 
 
                 targ = lbl_msk[j][msks[j, 0] > 0]
@@ -345,7 +401,10 @@ def validate(net, data_loader):
     f1 = 4 / np.sum(1.0 / (f1_sc + 1e-6))
 
     sc = 0.3 * d0 + 0.7 * f1
-    print("Val Score: {}, Dice: {}, F1: {}, F1_0: {}, F1_1: {}, F1_2: {}, F1_3: {}".format(sc, d0, f1, f1_sc[0], f1_sc[1], f1_sc[2], f1_sc[3]))
+    print("Val Score: {}, F1_loc {} (tp {}, fn {}, fp {}) F1: {} , F1_0: {} (tp {}, fn {}, fp {}), F1_1: {} (tp {}, fn {}, fp {}), F1_2: {}  (tp {}, fn {}, fp {}), F1_3: {}  (tp {}, fn {}, fp {})"\
+        .format(sc, d0, tp[4], fn[4], fp[4],f1, f1_sc[0] ,tp[0], fn[0], fp[0],\
+             f1_sc[1],tp[1], fn[1], fp[1], f1_sc[2],tp[2], fn[2], fp[2],\
+                 f1_sc[3], tp[3], fn[3], fp[3]))
     return sc
 
 
@@ -429,8 +488,8 @@ if __name__ == '__main__':
 
     cudnn.benchmark = True
 
-    batch_size = 16
-    val_batch_size = 4
+    batch_size = 48
+    val_batch_size = 12
 
     snapshot_name = 'res50_cls_cce_{}_0'.format(seed)
 
@@ -464,9 +523,10 @@ if __name__ == '__main__':
 
     data_train = TrainData(train_idxs)
     val_train = ValData(val_idxs)
-
+    test_data = TestData(list(range(len(test_files))))
     train_data_loader = DataLoader(data_train, batch_size=batch_size, num_workers=6, shuffle=True, pin_memory=False, drop_last=True)
     val_data_loader = DataLoader(val_train, batch_size=val_batch_size, num_workers=6, shuffle=False, pin_memory=False)
+    test_data_loader = DataLoader(test_data, batch_size=val_batch_size, num_workers=6, shuffle=False, pin_memory=False)
 
     model = SeResNext50_Unet_Double().cuda()
 
@@ -478,7 +538,7 @@ if __name__ == '__main__':
 
     scheduler = lr_scheduler.MultiStepLR(optimizer, milestones=[5, 11, 17, 23, 29, 33, 47, 50, 60, 70, 90, 110, 130, 150, 170, 180, 190], gamma=0.5)
 
-    snap_to_load = 'res50_loc_{}_0_best'.format(seed)
+    snap_to_load = 'res50_cls_cce_{}_0_best'.format(seed)
     print("=> loading checkpoint '{}'".format(snap_to_load))
     checkpoint = torch.load(path.join(models_folder, snap_to_load), map_location='cpu')
     loaded_dict = checkpoint['state_dict']
@@ -493,6 +553,7 @@ if __name__ == '__main__':
     del loaded_dict
     del sd
     del checkpoint
+
     gc.collect()
     torch.cuda.empty_cache()
 
@@ -508,6 +569,8 @@ if __name__ == '__main__':
         if epoch % 2 == 0:
             torch.cuda.empty_cache()
             best_score = evaluate_val(val_data_loader, best_score, model, snapshot_name, epoch)
+
+    evaluate_val(test_data_loader, best_score, model, snapshot_name, epoch)
 
     elapsed = timeit.default_timer() - t0
     print('Time: {:.3f} min'.format(elapsed / 60))
