@@ -44,7 +44,7 @@ import gc
 cv2.setNumThreads(0)
 cv2.ocl.setUseOpenCL(False)
 
-train_dirs = ['train','test']
+train_dirs = ['train','hold','test']
 
 models_folder = 'weights'
 
@@ -55,13 +55,16 @@ input_shape = (512, 512)
 
 all_files = []
 test_files = []
+val_files = []
 for d in train_dirs:
     for f in sorted(listdir(path.join(d, 'images'))):
         if '_pre_disaster.png' in f:
             if d == 'test':
-                all_files.append(path.join(d, 'images', f))
-            else:
                 test_files.append(path.join(d, 'images', f))
+            elif d == 'hold':
+                val_files.append(path.join(d, 'images', f))
+            else:
+                all_files.append(path.join(d, 'images', f))
                 
 
 
@@ -265,7 +268,7 @@ class ValData(Dataset):
     def __getitem__(self, idx):
         _idx = self.image_idxs[idx]
 
-        fn = all_files[_idx]
+        fn = val_files[_idx]
 
         img = cv2.imread(fn, cv2.IMREAD_COLOR)
         img2 = cv2.imread(fn.replace('_pre_disaster', '_post_disaster'), cv2.IMREAD_COLOR)
@@ -375,22 +378,22 @@ def validate(net, data_loader):
 
             #msk_pred = msk_loc
             msk_pred = torch.sigmoid(out[:, 0, ...]).cpu().numpy()
-            msk_damage_pred = torch.softmax(out, dim=1).cpu().numpy()[:, 1:, ...]
+            msk_damage_pred = torch.softmax(out[:, 1:, ...], dim=1).cpu().numpy()[:, 1:, ...]
             
             for j in range(msks.shape[0]):
-                tp[4] += np.logical_and(msks[j, 0] > 0, msk_pred[j] > 0).sum()
-                fp[4] += np.logical_and(msks[j, 0] < 1, msk_pred[j] > 0).sum()
-                fn[4] += np.logical_and(msks[j, 0] > 0, msk_pred[j] < 1).sum()
+                tp[4] += np.logical_and(msks[j, 0] > 0, msk_pred[j] > _thr).sum()
+                fp[4] += np.logical_and(msks[j, 0] < 1, msk_pred[j] > _thr).sum()
+                fn[4] += np.logical_and(msks[j, 0] > 0, msk_pred[j] < _thr).sum()
 
 
-                targ = lbl_msk[j][msks[j, 0] > 0]
+                targ = lbl_msk[j]#[msks[j, 0] > 0]
                 pred = msk_damage_pred[j].argmax(axis=0)
                 pred = pred * (msk_pred[j] > _thr)
-                pred = pred[msks[j, 0] > 0]
+                pred = pred#[msks[j, 0] > 0]
                 for c in range(4):
-                    tp[c] += np.logical_and(pred == c, targ == c).sum()
-                    fn[c] += np.logical_and(pred != c, targ == c).sum()
-                    fp[c] += np.logical_and(pred == c, targ != c).sum()
+                    tp[c] += np.logical_and(pred == c , targ == c + 1).sum()
+                    fn[c] += np.logical_and(pred != c , targ == c + 1).sum()
+                    fp[c] += np.logical_and(pred == c , targ != c + 1).sum()
 
     d0 = 2 * tp[4] / (2 * tp[4] + fp[4] + fn[4])
 
@@ -447,7 +450,7 @@ def train_epoch(current_epoch, seg_loss, ce_loss, model, optimizer, scheduler, t
 
         loss5 = ce_loss(out, lbl_msk)
 
-        loss = 0.1 * loss0 + 0.1 * loss1 + 0.3 * loss2 + 0.3 * loss3 + 0.2 * loss4 + loss5 * 11
+        loss = 1 * loss0 + 0.1 * loss1 + 0.5 * loss2 + 0.4 * loss3 + 0.2 * loss4 + loss5 * 5
 
         with torch.no_grad():
             _probs = 1 - torch.sigmoid(out[:, 0, ...])
@@ -481,15 +484,15 @@ if __name__ == '__main__':
     makedirs(models_folder, exist_ok=True)
     
     seed = int(sys.argv[1])
-    # vis_dev = sys.argv[2]
+    vis_dev = sys.argv[2]
 
     # os.environ['CUDA_DEVICE_ORDER'] = 'PCI_BUS_ID'
-    # os.environ["CUDA_VISIBLE_DEVICES"] = vis_dev
+    os.environ["CUDA_VISIBLE_DEVICES"] = vis_dev
 
     cudnn.benchmark = True
 
-    batch_size = 48
-    val_batch_size = 12
+    batch_size = 8
+    val_batch_size = 4
 
     snapshot_name = 'res50_cls_cce_{}_0'.format(seed)
 
@@ -502,13 +505,13 @@ if __name__ == '__main__':
         file_classes.append(fl)
     file_classes = np.asarray(file_classes)
 
-    train_idxs0, val_idxs = train_test_split(np.arange(len(all_files)), test_size=0.1, random_state=seed)
+    #train_idxs0, val_idxs = train_test_split(np.arange(len(all_files)), test_size=0.1, random_state=seed)
 
     np.random.seed(seed + 1234)
     random.seed(seed + 1234)
 
     train_idxs = []
-    for i in train_idxs0:
+    for i in list(range(len(all_files))):
         train_idxs.append(i)
         if file_classes[i, 1:].max():
             train_idxs.append(i)
@@ -517,12 +520,12 @@ if __name__ == '__main__':
     train_idxs = np.asarray(train_idxs)
 
     steps_per_epoch = len(train_idxs) // batch_size
-    validation_steps = len(val_idxs) // val_batch_size
+    validation_steps = len(val_files)//5// val_batch_size
 
     print('steps_per_epoch', steps_per_epoch, 'validation_steps', validation_steps)
 
     data_train = TrainData(train_idxs)
-    val_train = ValData(val_idxs)
+    val_train = ValData(list(range(len(val_files)//5)))
     test_data = TestData(list(range(len(test_files))))
     train_data_loader = DataLoader(data_train, batch_size=batch_size, num_workers=6, shuffle=True, pin_memory=False, drop_last=True)
     val_data_loader = DataLoader(val_train, batch_size=val_batch_size, num_workers=6, shuffle=False, pin_memory=False)
@@ -534,25 +537,25 @@ if __name__ == '__main__':
 
     optimizer = AdamW(params, lr=0.0002, weight_decay=1e-6)
     
-    model, optimizer = amp.initialize(model, optimizer, opt_level="O1")
+    model, optimizer = amp.initialize(model, optimizer, opt_level="O0")
 
     scheduler = lr_scheduler.MultiStepLR(optimizer, milestones=[5, 11, 17, 23, 29, 33, 47, 50, 60, 70, 90, 110, 130, 150, 170, 180, 190], gamma=0.5)
 
-    snap_to_load = 'res50_cls_cce_{}_0_best'.format(seed)
-    print("=> loading checkpoint '{}'".format(snap_to_load))
-    checkpoint = torch.load(path.join(models_folder, snap_to_load), map_location='cpu')
-    loaded_dict = checkpoint['state_dict']
-    sd = model.state_dict()
-    for k in model.state_dict():
-        if k in loaded_dict and sd[k].size() == loaded_dict[k].size():
-            sd[k] = loaded_dict[k]
-    loaded_dict = sd
-    model.load_state_dict(loaded_dict)
-    print("loaded checkpoint '{}' (epoch {}, best_score {})"
-            .format(snap_to_load, checkpoint['epoch'], checkpoint['best_score']))
-    del loaded_dict
-    del sd
-    del checkpoint
+    # snap_to_load = 'res50_cls_cce_{}_0_best'.format(seed)
+    # print("=> loading checkpoint '{}'".format(snap_to_load))
+    # checkpoint = torch.load(path.join(models_folder, snap_to_load), map_location='cpu')
+    # loaded_dict = checkpoint['state_dict']
+    # sd = model.state_dict()
+    # for k in model.state_dict():
+    #     if k in loaded_dict and sd[k].size() == loaded_dict[k].size():
+    #         sd[k] = loaded_dict[k]
+    # loaded_dict = sd
+    # model.load_state_dict(loaded_dict)
+    # print("loaded checkpoint '{}' (epoch {}, best_score {})"
+    #         .format(snap_to_load, checkpoint['epoch'], checkpoint['best_score']))
+    # del loaded_dict
+    # del sd
+    # del checkpoint
 
     gc.collect()
     torch.cuda.empty_cache()
@@ -564,9 +567,9 @@ if __name__ == '__main__':
 
     best_score = 0
     torch.cuda.empty_cache()
-    for epoch in range(20):
+    for epoch in range(50):
         train_epoch(epoch, seg_loss, ce_loss, model, optimizer, scheduler, train_data_loader)
-        if epoch % 2 == 0:
+        if epoch % 10 == 0:
             torch.cuda.empty_cache()
             best_score = evaluate_val(val_data_loader, best_score, model, snapshot_name, epoch)
 
