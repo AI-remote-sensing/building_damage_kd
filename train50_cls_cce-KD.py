@@ -1,4 +1,5 @@
 import os
+import argparse
 os.environ["MKL_NUM_THREADS"] = "2" 
 os.environ["NUMEXPR_NUM_THREADS"] = "2" 
 os.environ["OMP_NUM_THREADS"] = "2" 
@@ -43,23 +44,43 @@ from sklearn.metrics import accuracy_score
 
 import gc
 
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--mode", default="T-S", choices=["onlyT", "onlyS", "T-S"])
+parser.add_argument(
+    "--loss",
+    default="Cls+LWF+LFL",
+    choices=["onlyCls", "Cls+LWF", "Cls+LFL", "Cls+LWF+LFL", "TwoTeacher"],
+)
+parser.add_argument(
+    "--dataset", default="/data1/su/app/xview2/xview2_1st_place_solution/"
+)
+parser.add_argument("--checkpoint_path", default="weights")
+parser.add_argument("--seed", default=1, type=int)
+parser.add_argument("--vis_dev", default=1, type=int)
+parser.add_argument("--loc_folder", default='pred_loc_val', type=str)
+parser.add_argument("--batch_size", default=5, type=int)
+parser.add_argument("--val_batch_size", default=4, type=int)
+
+args = parser.parse_args()
+
 cv2.setNumThreads(0)
 cv2.ocl.setUseOpenCL(False)
 
 train_dirs = ['train', 'tier3']
 
-models_folder = 'weights'
+models_folder = args.checkpoint_path
 
-loc_folder = 'pred_loc_val'
+loc_folder = args.loc_folder
 
 input_shape = (512, 512)
 
 
 all_files = []
 for d in train_dirs:
-    for f in sorted(listdir(path.join(d, 'images'))):
+    for f in sorted(listdir(path.join(args.dataset + d, 'images'))):
         if '_pre_disaster.png' in f:
-            all_files.append(path.join(d, 'images', f))
+            all_files.append(path.join(args.dataset + d, 'images', f))
 
 
 class TrainData(Dataset):
@@ -348,10 +369,11 @@ def validate(model, data_loader):
 
     sc = 0.3 * d0 + 0.7 * f1
     print("Val Score: {}, Dice: {}, F1: {}, F1_0: {}, F1_1: {}, F1_2: {}, F1_3: {}".format(sc, d0, f1, f1_sc[0], f1_sc[1], f1_sc[2], f1_sc[3]))
+
     return sc
 
 
-def evaluate_val_kd(data_val, best_score, model, snapshot_name, current_epoch):
+def evaluate_val_kd(args, data_val, best_score, model, snapshot_name, current_epoch):
     model.eval()
     d = validate(model, data_loader=data_val)
 
@@ -367,48 +389,56 @@ def evaluate_val_kd(data_val, best_score, model, snapshot_name, current_epoch):
     return best_score
 
 
-def train_epoch_kd(current_epoch, seg_loss, ce_loss, model_s, model_t, optimizer, scheduler, train_data_loader,theta=1,alpha=1,beta=1):
+def train_epoch_kd(args, current_epoch, seg_loss, ce_loss, model_s, model_t, optimizer, scheduler, train_data_loader,theta=1,alpha=1,beta=1):
     losses = AverageMeter()
     losses1 = AverageMeter()
 
     dices = AverageMeter()
 
     iterator = tqdm(train_data_loader)
-    model_s.train()
-    model_t.eval()
+
+    if args.mode == "onlyT":
+        model_t.train(mode=True)
+    elif args.mode == "onlyS":
+        model_s.train(mode=True)
+    else:
+        model_s.train(mode=True)
+        model_t.eval()
+
     for i, sample in enumerate(iterator):
         imgs = sample["img"].cuda(non_blocking=True)
         msks = sample["msk"].cuda(non_blocking=True)
         lbl_msk = sample["lbl_msk"].cuda(non_blocking=True)
         
         # with torch.no_grad():
-        out_t = model_t(imgs)
-        # soft_out_t = torch.exp(soft_out_t)
-        feature_tmp = model_t.conv1(imgs[:,:3,:,:])
-        feature_tmp = model_t.conv2(feature_tmp)
-        feature_tmp = model_t.conv3(feature_tmp)
-        feature_tmp = model_t.conv4(feature_tmp)
-        feature_tmp = model_t.conv5(feature_tmp)
-        feature_t = model_t.conv1(imgs[:,3:,:,:])
-        feature_t = model_t.conv2(feature_t)
-        feature_t = model_t.conv3(feature_t)
-        feature_t = model_t.conv4(feature_t)
-        feature_t = model_t.conv5(feature_t)
-        feature_t = torch.cat([feature_tmp,feature_t],1)
-            
-        out_s = model_s(imgs)
-        # soft_out_s = torch.exp(soft_out_s)
-        feature_tmp = model_s.conv1(imgs[:,:3,:,:])
-        feature_tmp = model_s.conv2(feature_tmp)
-        feature_tmp = model_s.conv3(feature_tmp)
-        feature_tmp = model_s.conv4(feature_tmp)
-        feature_tmp = model_s.conv5(feature_tmp)
-        feature_s = model_s.conv1(imgs[:,3:,:,:])
-        feature_s = model_s.conv2(feature_s)
-        feature_s = model_s.conv3(feature_s)
-        feature_s = model_s.conv4(feature_s)
-        feature_s = model_s.conv5(feature_s)
-        feature_s = torch.cat([feature_tmp,feature_s],1)
+        if args.mode != "onlyS":
+            out_t = model_t(imgs)
+            # soft_out_t = torch.exp(soft_out_t)
+            feature_tmp = model_t.conv1(imgs[:,:3,:,:])
+            feature_tmp = model_t.conv2(feature_tmp)
+            feature_tmp = model_t.conv3(feature_tmp)
+            feature_tmp = model_t.conv4(feature_tmp)
+            feature_tmp = model_t.conv5(feature_tmp)
+            feature_t = model_t.conv1(imgs[:,3:,:,:])
+            feature_t = model_t.conv2(feature_t)
+            feature_t = model_t.conv3(feature_t)
+            feature_t = model_t.conv4(feature_t)
+            feature_t = model_t.conv5(feature_t)
+            feature_t = torch.cat([feature_tmp,feature_t],1)
+        if args.mode != "onlyT":
+            out_s = model_s(imgs)
+            # soft_out_s = torch.exp(soft_out_s)
+            feature_tmp = model_s.conv1(imgs[:,:3,:,:])
+            feature_tmp = model_s.conv2(feature_tmp)
+            feature_tmp = model_s.conv3(feature_tmp)
+            feature_tmp = model_s.conv4(feature_tmp)
+            feature_tmp = model_s.conv5(feature_tmp)
+            feature_s = model_s.conv1(imgs[:,3:,:,:])
+            feature_s = model_s.conv2(feature_s)
+            feature_s = model_s.conv3(feature_s)
+            feature_s = model_s.conv4(feature_s)
+            feature_s = model_s.conv5(feature_s)
+            feature_s = torch.cat([feature_tmp,feature_s],1)
 
         lbl_msk_01 =torch.cat(((lbl_msk==0).unsqueeze(1),
                      (lbl_msk==1).unsqueeze(1),
@@ -416,36 +446,63 @@ def train_epoch_kd(current_epoch, seg_loss, ce_loss, model_s, model_t, optimizer
                      (lbl_msk==3).unsqueeze(1),
                      (lbl_msk==4).unsqueeze(1),
                     ), dim=1)
-        loss_cls = - (F.log_softmax(out_s,dim=1)*lbl_msk_01).mean()
-        loss_kf = torch.norm(feature_s-feature_t,p=2,dim=0).mean()
-        loss_ko = - (F.softmax(out_t,dim=1) * F.log_softmax(out_s,dim=1) * lbl_msk_01).mean()
-        loss = theta * loss_cls + loss_kf*alpha + loss_ko*beta
+        if args.mode == "T-S":
+            loss_cls = - (F.log_softmax(out_s,dim=1)*lbl_msk_01).mean()
+            loss_kf = torch.norm(feature_s-feature_t,p=2,dim=0).mean()
+            loss_ko = - (F.softmax(out_t,dim=1) * F.log_softmax(out_s,dim=1) * lbl_msk_01).mean()
+            loss = theta * loss_cls + loss_kf*alpha + loss_ko*beta
         
 
-        loss0 = seg_loss(out_s[:, 0, ...], msks[:, 0, ...])
-        loss1 = seg_loss(out_s[:, 1, ...], msks[:, 1, ...])
-        loss2 = seg_loss(out_s[:, 2, ...], msks[:, 2, ...])
-        loss3 = seg_loss(out_s[:, 3, ...], msks[:, 3, ...])
-        loss4 = seg_loss(out_s[:, 4, ...], msks[:, 4, ...])
+            loss0 = seg_loss(out_s[:, 0, ...], msks[:, 0, ...])
+            loss1 = seg_loss(out_s[:, 1, ...], msks[:, 1, ...])
+            loss2 = seg_loss(out_s[:, 2, ...], msks[:, 2, ...])
+            loss3 = seg_loss(out_s[:, 3, ...], msks[:, 3, ...])
+            loss4 = seg_loss(out_s[:, 4, ...], msks[:, 4, ...])
 
-        loss5 = ce_loss(out_s, lbl_msk)
+            loss5 = ce_loss(out_s, lbl_msk)
 
-        loss_extra = 0.1 * loss0 + 0.1 * loss1 + 0.3 * loss2 + 0.3 * loss3 + 0.2 * loss4 + loss5 * 11
-        # loss += loss_extra
+            loss_extra = 0.1 * loss0 + 0.1 * loss1 + 0.3 * loss2 + 0.3 * loss3 + 0.2 * loss4 + loss5 * 11
+            loss += loss_extra
 
-        with torch.no_grad():
-            _probs = 1 - torch.sigmoid(out_s[:, 0, ...])
-            dice_sc = 1 - dice_round(_probs, 1 - msks[:, 0, ...])
+            with torch.no_grad():
+                _probs = 1 - torch.sigmoid(out_s[:, 0, ...])
+                dice_sc = 1 - dice_round(_probs, 1 - msks[:, 0, ...])
+        elif args.mode == "onlyT":
+            loss0 = seg_loss(out_t[:, 0, ...], msks[:, 0, ...])
+            loss1 = seg_loss(out_t[:, 1, ...], msks[:, 1, ...])
+            loss2 = seg_loss(out_t[:, 2, ...], msks[:, 2, ...])
+            loss3 = seg_loss(out_t[:, 3, ...], msks[:, 3, ...])
+            loss4 = seg_loss(out_t[:, 4, ...], msks[:, 4, ...])
+
+            loss5 = ce_loss(out_t, lbl_msk)
+            loss = 0.1 * loss0 + 0.1 * loss1 + 0.3 * loss2 + 0.3 * loss3 + 0.2 * loss4 + loss5 * 11
+        else:
+            loss0 = seg_loss(out_s[:, 0, ...], msks[:, 0, ...])
+            loss1 = seg_loss(out_s[:, 1, ...], msks[:, 1, ...])
+            loss2 = seg_loss(out_s[:, 2, ...], msks[:, 2, ...])
+            loss3 = seg_loss(out_s[:, 3, ...], msks[:, 3, ...])
+            loss4 = seg_loss(out_s[:, 4, ...], msks[:, 4, ...])
+
+            loss5 = ce_loss(out_s, lbl_msk)
+            loss = 0.1 * loss0 + 0.1 * loss1 + 0.3 * loss2 + 0.3 * loss3 + 0.2 * loss4 + loss5 * 11
+
 
         losses.update(loss.item(), imgs.size(0))
         losses1.update(loss5.item(), imgs.size(0))
 
         dices.update(dice_sc.item(), imgs.size(0))
 
-        iterator.set_description(
-            "epoch: {}; lr {:.7f}; Loss {loss.val:.4f} ({loss.avg:.4f}),Loss_cls {loss_cls:.4f},Loss_kf {loss_kf:.4f},Loss_ko {loss_ko:.4f}; cce_loss {loss1.val:.4f} ({loss1.avg:.4f}); Dice {dice.val:.4f} ({dice.avg:.4f})".format(
-                current_epoch, scheduler.get_lr()[-1], loss=losses,loss_cls=theta * loss_cls.item(),loss_kf=alpha*loss_kf.item(),loss_ko=beta*loss_ko.item(),loss1=losses1,dice=dices))
-        
+        if args.mode == "T-S":
+            iterator.set_description(
+                "epoch: {}; lr {:.7f}; Loss {loss.val:.4f} ({loss.avg:.4f}),Loss_cls {loss_cls:.4f},Loss_kf {loss_kf:.4f},Loss_ko {loss_ko:.4f}; cce_loss {loss1.val:.4f} ({loss1.avg:.4f}); Dice {dice.val:.4f} ({dice.avg:.4f})".format(
+                    current_epoch, scheduler.get_lr()[-1], loss=losses,loss_cls=theta * loss_cls.item(),loss_kf=alpha*loss_kf.item(),loss_ko=beta*loss_ko.item(),loss1=losses1,dice=dices))
+        else:
+            iterator.set_description(
+                "epoch: {}; lr {:.7f}; Loss {loss.val:.4f}; cce_loss {loss1.val:.4f} ({loss1.avg:.4f}); Dice {dice.val:.4f} ({dice.avg:.4f})".format(
+                    current_epoch, scheduler.get_lr()[-1], loss=losses, loss1=losses1, dice=dices
+                )
+            )
+
         optimizer.zero_grad()
         # loss.backward()
         with amp.scale_loss(loss, optimizer) as scaled_loss:
@@ -464,16 +521,16 @@ if __name__ == '__main__':
 
     makedirs(models_folder, exist_ok=True)
     
-    seed = int(sys.argv[1])
-    vis_dev = sys.argv[2]
+    seed = args.seed
+    vis_dev = args.vis_dev
 
     # os.environ['CUDA_DEVICE_ORDER'] = 'PCI_BUS_ID'
-    os.environ["CUDA_VISIBLE_DEVICES"] = vis_dev
+    os.environ["CUDA_VISIBLE_DEVICES"] = str(vis_dev)
 
     cudnn.benchmark = True
 
-    batch_size = 5
-    val_batch_size = 4
+    batch_size = args.batch_size
+    val_batch_size = args.val_batch_size
 
     snapshot_name = 'res50_cls_cce_{}_KD'.format(seed)
 
@@ -511,40 +568,53 @@ if __name__ == '__main__':
     train_data_loader = DataLoader(data_train, batch_size=batch_size, num_workers=6, shuffle=True, pin_memory=False, drop_last=True)
     val_data_loader = DataLoader(val_train, batch_size=val_batch_size, num_workers=6, shuffle=False, pin_memory=False)
 
-    model_s = SeResNext50_Unet_Double_KD().cuda()
-    model_t = SeResNext50_Unet_Double().cuda()
+    if args.mode == "onlyT":
+        model_t = SeResNext50_Unet_Double().cuda()
+    elif args.mode == "onlyS":
+        model_s = SeResNext50_Unet_Double_KD().cuda()
+    else:
+        model_t = SeResNext50_Unet_Double().cuda()
+        model_s = SeResNext50_Unet_Double_KD().cuda()
+        
 
-    params = model_s.parameters()
-    optimizer = AdamW(params, lr=0.0002, weight_decay=1e-6)
-    model_s, optimizer = amp.initialize(model_s, optimizer, opt_level="O0")
-    scheduler = lr_scheduler.MultiStepLR(optimizer, milestones=[5, 11, 17, 23, 29, 33, 47, 50, 60, 70, 90, 110, 130, 150, 170, 180, 190], gamma=0.5)
+    if args.mode != "onlyT":
+        params = model_s.parameters()
+        optimizer = AdamW(params, lr=0.0002, weight_decay=1e-6)
+        model_s, optimizer = amp.initialize(model_s, optimizer, opt_level="O0")
+        scheduler = lr_scheduler.MultiStepLR(optimizer, milestones=[5, 11, 17, 23, 29, 33, 47, 50, 60, 70, 90, 110, 130, 150, 170, 180, 190], gamma=0.5)
+    else:
+        params = model_t.parameters()
+        optimizer = AdamW(params, lr=0.0002, weight_decay=1e-6)
+        model_t, optimizer = amp.initialize(model_t, optimizer, opt_level="O0")
+        scheduler = lr_scheduler.MultiStepLR(optimizer, milestones=[5, 11, 17, 23, 29, 33, 47, 50, 60, 70, 90, 110, 130, 150, 170, 180, 190], gamma=0.5)
 
-    snap_to_load = 'res50_loc_{}_KD_best'.format(seed)
-    print("=> loading checkpoint '{}'".format(snap_to_load))
-    checkpoint = torch.load(path.join(models_folder, snap_to_load), map_location='cpu')
-    loaded_dict = checkpoint['state_dict']
-    sd = model_s.state_dict()
-    for k in model_s.state_dict():
-        if k in loaded_dict and sd[k].size() == loaded_dict[k].size():
-            sd[k] = loaded_dict[k]
-    loaded_dict = sd
-    model_s.load_state_dict(loaded_dict)
-    print("loaded checkpoint '{}' (epoch {}, best_score {})"
-            .format(snap_to_load, checkpoint['epoch'], checkpoint['best_score']))
+    if args.mode == "T-S":
+        snap_to_load = 'res50_loc_{}_KD_best'.format(seed)
+        print("=> loading checkpoint '{}'".format(snap_to_load))
+        checkpoint = torch.load(path.join(models_folder, snap_to_load), map_location='cpu')
+        loaded_dict = checkpoint['state_dict']
+        sd = model_s.state_dict()
+        for k in model_s.state_dict():
+            if k in loaded_dict and sd[k].size() == loaded_dict[k].size():
+                sd[k] = loaded_dict[k]
+        loaded_dict = sd
+        model_s.load_state_dict(loaded_dict)
+        print("loaded checkpoint '{}' (epoch {}, best_score {})"
+                .format(snap_to_load, checkpoint['epoch'], checkpoint['best_score']))
     
-    checkpoint = torch.load('weights/res50_cls_cce_1_tuned_best',map_location='cpu')
-    loaded_dict = checkpoint['state_dict']
-    sd = model_t.state_dict()
-    for k in model_t.state_dict():
-        if k in loaded_dict and sd[k].size() == loaded_dict[k].size():
-            sd[k] = loaded_dict[k]
-    loaded_dict = sd
-    model_t.load_state_dict(loaded_dict)
-    for key, value in model_t.named_parameters():# named_parameters()包含网络模块名称 key为模型模块名称 value为模型模块值，可以通过判断模块名称进行对应模块冻结
-        value.requires_grad = False
-    del loaded_dict
-    del sd
-    del checkpoint
+        checkpoint = torch.load('weights/res50_cls_cce_1_tuned_best',map_location='cpu')
+        loaded_dict = checkpoint['state_dict']
+        sd = model_t.state_dict()
+        for k in model_t.state_dict():
+            if k in loaded_dict and sd[k].size() == loaded_dict[k].size():
+                sd[k] = loaded_dict[k]
+        loaded_dict = sd
+        model_t.load_state_dict(loaded_dict)
+        for key, value in model_t.named_parameters():# named_parameters()包含网络模块名称 key为模型模块名称 value为模型模块值，可以通过判断模块名称进行对应模块冻结
+            value.requires_grad = False
+        del loaded_dict
+        del sd
+        del checkpoint
     
     # model_s = nn.DataParallel(model_s).cuda()
     # model_t = nn.DataParallel(model_t).cuda()
@@ -557,11 +627,25 @@ if __name__ == '__main__':
 
     best_score = 0
     torch.cuda.empty_cache()
-    for epoch in range(20):
-        train_epoch_kd(epoch, seg_loss, ce_loss, model_s, model_t, optimizer, scheduler, train_data_loader)
-        if epoch % 2 == 0:
-            torch.cuda.empty_cache()
-            best_score = evaluate_val_kd(val_data_loader, best_score, model_s, snapshot_name, epoch)
+
+    if args.mode == 'T-S':
+        for epoch in range(20):
+            train_epoch_kd(args, epoch, seg_loss, ce_loss, model_s, model_t, optimizer, scheduler, train_data_loader)
+            if epoch % 2 == 0:
+                torch.cuda.empty_cache()
+                best_score = evaluate_val_kd(args , val_data_loader, best_score, model_s, snapshot_name, epoch)
+    elif args.mode == "onlyT":
+        for epoch in range(20):
+            train_epoch_kd(args, epoch, seg_loss, ce_loss, model_t, model_t, optimizer, scheduler, train_data_loader)
+            if epoch % 2 == 0:
+                torch.cuda.empty_cache()
+                best_score = evaluate_val_kd(args , val_data_loader, best_score, model_t, snapshot_name, epoch)
+    else:
+        for epoch in range(20):
+            train_epoch_kd(args, epoch, seg_loss, ce_loss, model_s, model_s, optimizer, scheduler, train_data_loader)
+            if epoch % 2 == 0:
+                torch.cuda.empty_cache()
+                best_score = evaluate_val_kd(args , val_data_loader, best_score, model_s, snapshot_name, epoch)
 
     elapsed = timeit.default_timer() - t0
     print('Time: {:.3f} min'.format(elapsed / 60))

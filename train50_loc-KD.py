@@ -1,13 +1,16 @@
 import os
-os.environ["MKL_NUM_THREADS"] = "1" 
-os.environ["NUMEXPR_NUM_THREADS"] = "1" 
-os.environ["OMP_NUM_THREADS"] = "1" 
+
+os.environ["MKL_NUM_THREADS"] = "1"
+os.environ["NUMEXPR_NUM_THREADS"] = "1"
+os.environ["OMP_NUM_THREADS"] = "1"
 
 from os import path, makedirs, listdir
 import sys
 import numpy as np
+
 np.random.seed(1)
 import random
+
 random.seed(1)
 
 import torch
@@ -28,7 +31,7 @@ from tqdm import tqdm
 import timeit
 import cv2
 
-from zoo.models import SeResNext50_Unet_Loc,SeResNext50_Unet_Loc_KD
+from zoo.models import SeResNext50_Unet_Loc, SeResNext50_Unet_Loc_KD
 
 from imgaug import augmenters as iaa
 
@@ -42,21 +45,44 @@ import gc
 
 from apex import amp
 
+import argparse
+import pymongo
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--mode", default="T-S", choices=["onlyT", "onlyS", "T-S"])
+parser.add_argument(
+    "--loss",
+    default="Cls+LWF+LFL",
+    choices=["onlyCls", "Cls+LWF", "Cls+LFL", "Cls+LWF+LFL", "TwoTeacher"],
+)
+parser.add_argument(
+    "--dataset", default="/data1/su/app/xview2/xview2_1st_place_solution/"
+)
+parser.add_argument("--checkpoint_path", default="weights")
+parser.add_argument("--seed", default=1, type=int)
+parser.add_argument("--vis_dev", default=0, type=int)
+parser.add_argument("--batch_size", default=8, type=int)
+parser.add_argument("--val_batch_size", default=4, type=int)
+# batch_size = args.batch_size
+# val_batch_size = args.val_batch_size
+
+args = parser.parse_args()
+
 cv2.setNumThreads(0)
 cv2.ocl.setUseOpenCL(False)
 
-train_dirs = ['train', 'tier3']
+train_dirs = ["train", "tier3"]
 
-models_folder = 'weights'
+models_folder = args.checkpoint_path
 
 input_shape = (512, 512)
 
 
 all_files = []
 for d in train_dirs:
-    for f in sorted(listdir(path.join(d, 'images'))):
-        if '_pre_disaster.png' in f:
-            all_files.append(path.join(d, 'images', f))
+    for f in sorted(listdir(path.join(args.dataset + d, "images"))):
+        if "_pre_disaster.png" in f:
+            all_files.append(path.join(args.dataset + d, "images", f))
 
 
 class TrainData(Dataset):
@@ -76,9 +102,11 @@ class TrainData(Dataset):
         img = cv2.imread(fn, cv2.IMREAD_COLOR)
 
         if random.random() > 0.985:
-            img = cv2.imread(fn.replace('_pre_disaster', '_post_disaster'), cv2.IMREAD_COLOR)
+            img = cv2.imread(
+                fn.replace("_pre_disaster", "_post_disaster"), cv2.IMREAD_COLOR
+            )
 
-        msk0 = cv2.imread(fn.replace('/images/', '/masks/'), cv2.IMREAD_UNCHANGED)
+        msk0 = cv2.imread(fn.replace("/images/", "/masks/"), cv2.IMREAD_UNCHANGED)
 
         if random.random() > 0.5:
             img = img[::-1, ...]
@@ -94,9 +122,12 @@ class TrainData(Dataset):
             shift_pnt = (random.randint(-320, 320), random.randint(-320, 320))
             img = shift_image(img, shift_pnt)
             msk0 = shift_image(msk0, shift_pnt)
-            
+
         if random.random() > 0.9:
-            rot_pnt =  (img.shape[0] // 2 + random.randint(-320, 320), img.shape[1] // 2 + random.randint(-320, 320))
+            rot_pnt = (
+                img.shape[0] // 2 + random.randint(-320, 320),
+                img.shape[1] // 2 + random.randint(-320, 320),
+            )
             scale = 0.9 + random.random() * 0.2
             angle = random.randint(0, 20) - 10
             if (angle != 0) or (scale != 1):
@@ -105,7 +136,9 @@ class TrainData(Dataset):
 
         crop_size = input_shape[0]
         if random.random() > 0.3:
-            crop_size = random.randint(int(input_shape[0] / 1.1), int(input_shape[0] / 0.9))
+            crop_size = random.randint(
+                int(input_shape[0] / 1.1), int(input_shape[0] / 0.9)
+            )
 
         bst_x0 = random.randint(0, img.shape[1] - crop_size)
         bst_y0 = random.randint(0, img.shape[0] - crop_size)
@@ -114,25 +147,29 @@ class TrainData(Dataset):
         for i in range(try_cnt):
             x0 = random.randint(0, img.shape[1] - crop_size)
             y0 = random.randint(0, img.shape[0] - crop_size)
-            _sc = msk0[y0:y0+crop_size, x0:x0+crop_size].sum()
+            _sc = msk0[y0 : y0 + crop_size, x0 : x0 + crop_size].sum()
             if _sc > bst_sc:
                 bst_sc = _sc
                 bst_x0 = x0
                 bst_y0 = y0
         x0 = bst_x0
         y0 = bst_y0
-        img = img[y0:y0+crop_size, x0:x0+crop_size, :]
-        msk0 = msk0[y0:y0+crop_size, x0:x0+crop_size]
+        img = img[y0 : y0 + crop_size, x0 : x0 + crop_size, :]
+        msk0 = msk0[y0 : y0 + crop_size, x0 : x0 + crop_size]
 
         if crop_size != input_shape[0]:
             img = cv2.resize(img, input_shape, interpolation=cv2.INTER_LINEAR)
             msk0 = cv2.resize(msk0, input_shape, interpolation=cv2.INTER_LINEAR)
 
         if random.random() > 0.99:
-            img = shift_channels(img, random.randint(-5, 5), random.randint(-5, 5), random.randint(-5, 5))
+            img = shift_channels(
+                img, random.randint(-5, 5), random.randint(-5, 5), random.randint(-5, 5)
+            )
 
         if random.random() > 0.99:
-            img = change_hsv(img, random.randint(-5, 5), random.randint(-5, 5), random.randint(-5, 5))
+            img = change_hsv(
+                img, random.randint(-5, 5), random.randint(-5, 5), random.randint(-5, 5)
+            )
 
         if random.random() > 0.99:
             if random.random() > 0.99:
@@ -148,7 +185,7 @@ class TrainData(Dataset):
                 img = brightness(img, 0.9 + random.random() * 0.2)
             elif random.random() > 0.99:
                 img = contrast(img, 0.9 + random.random() * 0.2)
-                
+
         if random.random() > 0.999:
             el_det = self.elastic.to_deterministic()
             img = el_det.augment_image(img)
@@ -162,11 +199,10 @@ class TrainData(Dataset):
         img = torch.from_numpy(img.transpose((2, 0, 1))).float()
         msk = torch.from_numpy(msk.transpose((2, 0, 1))).long()
 
-        sample = {'img': img, 'msk': msk, 'fn': fn}
+        sample = {"img": img, "msk": msk, "fn": fn}
         return sample
 
 
-    
 class ValData(Dataset):
     def __init__(self, image_idxs):
         super().__init__()
@@ -182,7 +218,7 @@ class ValData(Dataset):
 
         img = cv2.imread(fn, cv2.IMREAD_COLOR)
 
-        msk0 = cv2.imread(fn.replace('/images/', '/masks/'), cv2.IMREAD_UNCHANGED)
+        msk0 = cv2.imread(fn.replace("/images/", "/masks/"), cv2.IMREAD_UNCHANGED)
 
         msk = msk0[..., np.newaxis]
 
@@ -193,7 +229,7 @@ class ValData(Dataset):
         img = torch.from_numpy(img.transpose((2, 0, 1))).float()
         msk = torch.from_numpy(msk.transpose((2, 0, 1))).long()
 
-        sample = {'img': img, 'msk': msk, 'fn': fn}
+        sample = {"img": img, "msk": msk, "fn": fn}
         return sample
 
 
@@ -206,11 +242,11 @@ def validate(model, data_loader):
         for i, sample in enumerate(tqdm(data_loader)):
             msks = sample["msk"].numpy()
             imgs = sample["img"].cuda(non_blocking=True)
-            
+
             out = model(imgs)
 
             msk_pred = torch.sigmoid(out[:, 0, ...]).cpu().numpy()
-            
+
             for j in range(msks.shape[0]):
                 dices0.append(dice(msks[j, 0], msk_pred[j] > _thr))
 
@@ -220,71 +256,125 @@ def validate(model, data_loader):
     return d0
 
 
-def evaluate_val_kd(data_val, best_score, model, snapshot_name, current_epoch):
+def evaluate_val_kd(args, data_val, best_score, model, snapshot_name, current_epoch):
     model.eval()
     d = validate(model, data_loader=data_val)
 
     if d > best_score:
-        torch.save({
-            'epoch': current_epoch + 1,
-            'state_dict': model.state_dict(),
-            'best_score': d,
-        }, path.join(models_folder, snapshot_name + '_best'))
+        torch.save(
+            {
+                "epoch": current_epoch + 1,
+                "state_dict": model.state_dict(),
+                "best_score": d,
+            },
+            path.join(models_folder, snapshot_name + "_best"),
+        )
         best_score = d
 
     print("score: {}\tscore_best: {}".format(d, best_score))
     return best_score
 
 
-
-def train_epoch_kd(current_epoch, seg_loss, model_s, model_t, optimizer, scheduler, train_data_loader,theta = 1,alpha = 1,beta = 1):
+def train_epoch_kd(
+    args,
+    current_epoch,
+    seg_loss,
+    model_s,
+    model_t,
+    optimizer,
+    scheduler,
+    train_data_loader,
+    theta=1,
+    alpha=1,
+    beta=1,
+):
     losses = AverageMeter()
 
     dices = AverageMeter()
 
     iterator = tqdm(train_data_loader)
-    model_s.train(mode=True)
-    model_t.eval()
+
+    if args.mode == "onlyT":
+        model_t.train(mode=True)
+    elif args.mode == "onlyS":
+        model_s.train(mode=True)
+    else:
+        model_s.train(mode=True)
+        model_t.eval()
+
     for i, sample in enumerate(iterator):
         imgs = sample["img"].cuda(non_blocking=True)
         msks = sample["msk"].cuda(non_blocking=True)
-        
-        
-        # with torch.no_grad():
-        soft_out_t = model_t(imgs)
-        soft_out_t = torch.sigmoid(soft_out_t[:,0, ...])
-        feature_t = model_t.conv1(imgs)
-        feature_t = model_t.conv2(feature_t)
-        feature_t = model_t.conv3(feature_t)
-        feature_t = model_t.conv4(feature_t)
-        feature_t = model_t.conv5(feature_t)
-            
-        soft_out_s = model_s(imgs)
-        soft_out_s = torch.sigmoid(soft_out_s[:,0, ...])
-        loss_seg = seg_loss(soft_out_s, msks)
-        feature_s = model_s.conv1(imgs)
-        feature_s = model_s.conv2(feature_s)
-        feature_s = model_s.conv3(feature_s)
-        feature_s = model_s.conv4(feature_s)
-        feature_s = model_s.conv5(feature_s)
 
+        if args.mode != "onlyS":
+            soft_out_t = model_t(imgs)
+            soft_out_t = torch.sigmoid(soft_out_t[:, 0, ...])
+            feature_t = model_t.conv1(imgs)
+            feature_t = model_t.conv2(feature_t)
+            feature_t = model_t.conv3(feature_t)
+            feature_t = model_t.conv4(feature_t)
+            feature_t = model_t.conv5(feature_t)
+        if args.mode != "onlyT":
+            soft_out_s = model_s(imgs)
+            soft_out_s = torch.sigmoid(soft_out_s[:, 0, ...])
+            feature_s = model_s.conv1(imgs)
+            feature_s = model_s.conv2(feature_s)
+            feature_s = model_s.conv3(feature_s)
+            feature_s = model_s.conv4(feature_s)
+            feature_s = model_s.conv5(feature_s)
+        # parser.add_argument('--loss',default='onlyCls',choices = ['onlyCls','Cls+LWF','Cls+LFL','Cls+LWF+LFL','TwoTeacher'])
+        if args.mode == "T-S":
+            loss_seg = seg_loss(soft_out_s, msks)
+            loss_cls = -torch.log(
+                soft_out_s * msks + (1 - soft_out_s) * (1 - msks)
+            ).mean()
+            loss = theta * loss_cls + loss_seg
 
-        loss_cls = -torch.log(soft_out_s * msks + (1-soft_out_s) * (1-msks)).mean()
-        loss_kf = torch.norm(feature_t-feature_s,p=2,dim=0).mean()
-        loss_ko = -((soft_out_t * msks + (1-soft_out_t) * (1-msks))*torch.log(soft_out_s * msks + (1-soft_out_s) * (1-msks))).mean()
-        loss = theta*loss_cls + loss_kf * alpha + loss_ko * beta +loss_seg
+            if args.loss != "onlyCls":
+                if "LWF" in args.loss.split("+"):
+                    loss_ko = -(
+                        (soft_out_t * msks + (1 - soft_out_t) * (1 - msks))
+                        * torch.log(soft_out_s * msks + (1 - soft_out_s) * (1 - msks))
+                    ).mean()
+                    loss += loss_ko * beta
+                if "LFL" in args.loss.split("+"):
+                    loss_kf = torch.norm(feature_t - feature_s, p=2, dim=0).mean()
+            with torch.no_grad():
+                dice_sc = 1 - dice_round(soft_out_s, msks[:, 0, ...])
+        elif args.mode == "onlyT":
+            loss = seg_loss(soft_out_t, masks)
+            with torch.no_grad():
+                dice_sc = 1 - dice_round(soft_out_t, msks[:, 0, ...])
+        else:
+            loss = seg_loss(soft_out_s, masks)
+            with torch.no_grad():
+                dice_sc = 1 - dice_round(soft_out_s, msks[:, 0, ...])
 
-        with torch.no_grad():
-            dice_sc = 1 - dice_round(soft_out_s, msks[:, 0, ...])
         losses.update(loss.item(), imgs.size(0))
 
         dices.update(dice_sc, imgs.size(0))
-        iterator.set_description(
-            "epoch: {}; lr {:.7f}; Loss {loss.val:.4f} ({loss.avg:.4f}),Loss_cls {loss_cls:.4f},Loss_kf {loss_kf:.4f},Loss_ko {loss_ko:.4f},Loss_seg {loss_seg:.4f}; Dice {dice.val:.4f} ({dice.avg:.4f})".format(
-                current_epoch, scheduler.get_lr()[-1], loss=losses,loss_cls=theta * loss_cls.item(),loss_kf=alpha*loss_kf.item(),loss_ko=beta*loss_ko.item(),loss_seg = loss_seg.item(),dice=dices))
-        
+        if args.mode == "T-S":
+            iterator.set_description(
+                "epoch: {}; lr {:.7f}; Loss {loss.val:.4f} ({loss.avg:.4f}),Loss_cls {loss_cls:.4f},Loss_kf {loss_kf:.4f},Loss_ko {loss_ko:.4f},Loss_seg {loss_seg:.4f}; Dice {dice.val:.4f} ({dice.avg:.4f})".format(
+                    current_epoch,
+                    scheduler.get_lr()[-1],
+                    loss=losses,
+                    loss_cls=theta * loss_cls.item(),
+                    loss_kf=alpha * loss_kf.item(),
+                    loss_ko=beta * loss_ko.item(),
+                    loss_seg=loss_seg.item(),
+                    dice=dices,
+                )
+            )
+        else:
+            iterator.set_description(
+                "epoch: {}; lr {:.7f}; Loss {loss.val:.4f}; Dice {dice.val:.4f} ({dice.avg:.4f})".format(
+                    current_epoch, scheduler.get_lr()[-1], loss=losses, dice=dices
+                )
+            )
+
         optimizer.zero_grad()
-        
+
         with amp.scale_loss(loss, optimizer) as scaled_loss:
             scaled_loss.backward()
         # loss.backward()
@@ -293,78 +383,164 @@ def train_epoch_kd(current_epoch, seg_loss, model_s, model_t, optimizer, schedul
 
     scheduler.step(current_epoch)
 
-    print("epoch: {}; lr {:.7f}; Loss {loss.avg:.4f}".format(
-                current_epoch, scheduler.get_lr()[-1], loss=losses))
+    print(
+        "epoch: {}; lr {:.7f}; Loss {loss.avg:.4f}".format(
+            current_epoch, scheduler.get_lr()[-1], loss=losses
+        )
+    )
 
 
-
-if __name__ == '__main__':
+if __name__ == "__main__":
     t0 = timeit.default_timer()
 
     makedirs(models_folder, exist_ok=True)
-    
-    seed = int(sys.argv[1]) 
-    vis_dev = sys.argv[2]
 
-    # os.environ['CUDA_DEVICE_ORDER'] = 'PCI_BUS_ID'
-    os.environ["CUDA_VISIBLE_DEVICES"] = vis_dev
+    seed = args.seed
+    vis_dev = args.vis_dev
+
+    os.environ["CUDA_VISIBLE_DEVICES"] = str(vis_dev)
 
     cudnn.benchmark = True
 
-    batch_size = 12
-    val_batch_size = 4
+    batch_size = args.batch_size
+    val_batch_size = args.val_batch_size
 
-    snapshot_name = 'res50_loc_{}_KD'.format(seed)
+    snapshot_name = "res50_loc_{}_KD".format(seed)
 
-    train_idxs, val_idxs = train_test_split(np.arange(len(all_files)), test_size=0.1, random_state=seed)
+    train_idxs, val_idxs = train_test_split(
+        np.arange(len(all_files)), test_size=0.1, random_state=seed
+    )
 
-    np.random.seed(seed+123)
-    random.seed(seed+123)
+    np.random.seed(seed + 123)
+    random.seed(seed + 123)
 
     steps_per_epoch = len(train_idxs) // batch_size
     validation_steps = len(val_idxs) // val_batch_size
 
-    print('steps_per_epoch', steps_per_epoch, 'validation_steps', validation_steps)
+    print("steps_per_epoch", steps_per_epoch, "validation_steps", validation_steps)
 
     data_train = TrainData(train_idxs)
     val_train = ValData(val_idxs)
 
-    train_data_loader = DataLoader(data_train, batch_size=batch_size, num_workers=5, shuffle=True, pin_memory=False, drop_last=True)
-    val_data_loader = DataLoader(val_train, batch_size=val_batch_size, num_workers=5, shuffle=False, pin_memory=False)
+    train_data_loader = DataLoader(
+        data_train,
+        batch_size=batch_size,
+        num_workers=5,
+        shuffle=True,
+        pin_memory=False,
+        drop_last=True,
+    )
+    val_data_loader = DataLoader(
+        val_train,
+        batch_size=val_batch_size,
+        num_workers=5,
+        shuffle=False,
+        pin_memory=False,
+    )
 
-    model_s = SeResNext50_Unet_Loc_KD().cuda()
-    model_t = SeResNext50_Unet_Loc().cuda()
-    
-    params = model_s.parameters()
-    optimizer = AdamW(params, lr=0.00015, weight_decay=1e-6)
-    model_s, optimizer = amp.initialize(model_s, optimizer, opt_level="O0")
-    scheduler = lr_scheduler.MultiStepLR(optimizer, milestones=[4, 6,8,10,12,14,15,16,17,18,19,20], gamma=0.5)
-    seg_loss = ComboLoss({'dice': 3.0, 'focal': 10.0}, per_image=False).cuda()
-    
-    
-    checkpoint = torch.load('weights/res50_loc_0_tuned_best',map_location='cpu')
-    loaded_dict = checkpoint['state_dict']
-    sd = model_t.state_dict()
-    for k in model_t.state_dict():
-        if k in loaded_dict and sd[k].size() == loaded_dict[k].size():
-            sd[k] = loaded_dict[k]
-    loaded_dict = sd
-    model_t.load_state_dict(loaded_dict)
-    for key, value in model_t.named_parameters():# named_parameters()包含网络模块名称 key为模型模块名称 value为模型模块值，可以通过判断模块名称进行对应模块冻结
-        value.requires_grad = False
-    del loaded_dict
-    del sd
-    del checkpoint
-    
+    if args.mode == "onlyT":
+        model_t = SeResNext50_Unet_Loc().cuda()
+    elif args.mode == "onlyS":
+        model_s = SeResNext50_Unet_Loc_KD().cuda()
+    else:
+        model_s = SeResNext50_Unet_Loc_KD().cuda()
+        model_t = SeResNext50_Unet_Loc().cuda()
+
+    if args.mode != "onlyT":
+        params = model_s.parameters()
+        optimizer = AdamW(params, lr=0.00015, weight_decay=1e-6)
+        model_s, optimizer = amp.initialize(model_s, optimizer, opt_level="O0")
+        scheduler = lr_scheduler.MultiStepLR(
+            optimizer,
+            milestones=[4, 6, 8, 10, 12, 14, 15, 16, 17, 18, 19, 20],
+            gamma=0.5,
+        )
+    else:
+        params = model_t.parameters()
+        optimizer = AdamW(params, lr=0.00015, weight_decay=1e-6)
+        model_t, optimizer = amp.initialize(model_t, optimizer, opt_level="O0")
+        scheduler = lr_scheduler.MultiStepLR(
+            optimizer,
+            milestones=[4, 6, 8, 10, 12, 14, 15, 16, 17, 18, 19, 20],
+            gamma=0.5,
+        )
+
+    seg_loss = ComboLoss({"dice": 3.0, "focal": 10.0}, per_image=False).cuda()
+
+    if args.mode == "T-S":
+        checkpoint = torch.load("weights/res50_loc_0_tuned_best", map_location="cpu")
+        loaded_dict = checkpoint["state_dict"]
+        sd = model_t.state_dict()
+        for k in model_t.state_dict():
+            if k in loaded_dict and sd[k].size() == loaded_dict[k].size():
+                sd[k] = loaded_dict[k]
+        loaded_dict = sd
+        model_t.load_state_dict(loaded_dict)
+        # named_parameters()包含网络模块名称 key为模型模块名称 value为模型模块值，可以通过判断模块名称进行对应模块冻结
+        for key, value in model_t.named_parameters():
+            value.requires_grad = False
+        del loaded_dict
+        del sd
+        del checkpoint
+
     best_score = 0
     _cnt = -1
     torch.cuda.empty_cache()
-    for epoch in range(20):
-        train_epoch_kd(epoch, seg_loss, model_s, model_t, optimizer, scheduler, train_data_loader)
-        if epoch % 1 == 0:
-            _cnt += 1
-            torch.cuda.empty_cache()
-            best_score = evaluate_val_kd(val_data_loader, best_score, model_s, snapshot_name, epoch)
+
+    if args.mode == "T-S":
+        for epoch in range(20):
+            train_epoch_kd(
+                args,
+                epoch,
+                seg_loss,
+                model_s,
+                model_t,
+                optimizer,
+                scheduler,
+                train_data_loader,
+            )
+            if epoch % 1 == 0:
+                _cnt += 1
+                torch.cuda.empty_cache()
+                best_score = evaluate_val_kd(
+                    args, val_data_loader, best_score, model_s, snapshot_name, epoch
+                )
+    elif args.mode == "onlyT":
+        for epoch in range(20):
+            train_epoch_kd(
+                args,
+                epoch,
+                seg_loss,
+                model_t,
+                model_t,
+                optimizer,
+                scheduler,
+                train_data_loader,
+            )
+            if epoch % 1 == 0:
+                _cnt += 1
+                torch.cuda.empty_cache()
+                best_score = evaluate_val_kd(
+                    args, val_data_loader, best_score, model_s, snapshot_name, epoch
+                )
+    else:
+        for epoch in range(20):
+            train_epoch_kd(
+                args,
+                epoch,
+                seg_loss,
+                model_s,
+                model_s,
+                optimizer,
+                scheduler,
+                train_data_loader,
+            )
+            if epoch % 1 == 0:
+                _cnt += 1
+                torch.cuda.empty_cache()
+                best_score = evaluate_val_kd(
+                    args, val_data_loader, best_score, model_s, snapshot_name, epoch
+                )
 
     elapsed = timeit.default_timer() - t0
-    print('Time: {:.3f} min'.format(elapsed / 60))
+    print("Time: {:.3f} min".format(elapsed / 60))
