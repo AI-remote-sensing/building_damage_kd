@@ -43,6 +43,7 @@ if __name__ == "__main__":
     for i in range(100):
         if i % 5 == 0:
             logger.add_attr("batch", i, "per5")
+            logger.add_attr("per5", i)
             logger.insert_into_db("per5")
         logger.add_attr("batch", i)
         logger.add_attr("content", "same text")

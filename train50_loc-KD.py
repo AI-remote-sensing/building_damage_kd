@@ -19,6 +19,7 @@ from torch.backends import cudnn
 from torch.utils.data import Dataset
 from torch.utils.data import DataLoader
 import torch.optim.lr_scheduler as lr_scheduler
+import time
 
 eps = 1e-6
 from apex import amp
@@ -31,7 +32,11 @@ from tqdm import tqdm
 import timeit
 import cv2
 
-from zoo.models import SeResNext50_Unet_Loc, SeResNext50_Unet_Loc_KD
+from zoo.models import (
+    SeResNext50_Unet_Loc,
+    SeResNext50_Unet_Loc_KD,
+    SeResNext50_Unet_Double,
+)
 
 from imgaug import augmenters as iaa
 
@@ -46,27 +51,44 @@ import gc
 from apex import amp
 
 import argparse
-import pymongo
+from mongo_logger import Logger
+
+DB = "building_damage_kd"
+COLLECTION = "v0_loc"
+logger = Logger(DB, COLLECTION)
 
 parser = argparse.ArgumentParser()
-parser.add_argument("--mode", default="T-S", choices=["onlyT", "onlyS", "T-S"])
 parser.add_argument(
-    "--loss",
-    default="Cls+LWF+LFL",
-    choices=["onlyCls", "Cls+LWF", "Cls+LFL", "Cls+LWF+LFL", "TwoTeacher"],
+    "--mode", default="T-S", choices=["onlyT", "onlyS", "T-S", "TwoTeacher"]
 )
-parser.add_argument(
-    "--dataset", default="/data1/su/app/xview2/xview2_1st_place_solution/"
-)
+parser.add_argument("--LWF", default=0, choices=[0, 1], type=int)
+parser.add_argument("--LFL", default=0, choices=[0, 1], type=int)
+parser.add_argument("--KL", default=0, choices=[0, 1], type=int)
+parser.add_argument("--dataset", default="/data1/su/app/xview2/building_damage_kd/")
 parser.add_argument("--checkpoint_path", default="weights")
 parser.add_argument("--seed", default=1, type=int)
 parser.add_argument("--vis_dev", default=0, type=int)
 parser.add_argument("--batch_size", default=8, type=int)
 parser.add_argument("--val_batch_size", default=4, type=int)
-# batch_size = args.batch_size
-# val_batch_size = args.val_batch_size
+parser.add_argument("--lr", default=0.0002, type=float)
+parser.add_argument("--weight_decay", default=1e-6, type=float)
+parser.add_argument("--theta", default=1.0, type=float)
+parser.add_argument("--alpha", default=1.0, type=float)
+parser.add_argument("--beta", default=1.0, type=float)
+parser.add_argument("--m", default=0.2, type=float)
 
 args = parser.parse_args()
+logger.add_attr("LWF", args.LWF, "info")
+logger.add_attr("LFL", args.LFL, "info")
+logger.add_attr("KL", args.KL, "info")
+logger.add_attr("mode", args.mode, "info")
+logger.add_attr("lr", args.lr, "info")
+logger.add_attr("theta", args.theta, "info")
+logger.add_attr("alpha", args.alpha, "info")
+logger.add_attr("beta", args.beta, "info")
+logger.add_attr("m", args.m, "info")
+logger.add_attr("weight_decay", args.weight_decay, "info")
+logger.insert_into_db("info")
 
 cv2.setNumThreads(0)
 cv2.ocl.setUseOpenCL(False)
@@ -234,6 +256,7 @@ class ValData(Dataset):
 
 
 def validate(model, data_loader):
+    global logger
     dices0 = []
 
     _thr = 0.5
@@ -242,23 +265,28 @@ def validate(model, data_loader):
         for i, sample in enumerate(tqdm(data_loader)):
             msks = sample["msk"].numpy()
             imgs = sample["img"].cuda(non_blocking=True)
-
+            t1 = time.time()
             out = model(imgs)
-
+            t2 = time.time()
+            logger.add_attr("batch_%s" % i, t2 - t1, "time_difference")
             msk_pred = torch.sigmoid(out[:, 0, ...]).cpu().numpy()
 
             for j in range(msks.shape[0]):
                 dices0.append(dice(msks[j, 0], msk_pred[j] > _thr))
 
+    logger.insert_into_db("time_difference")
     d0 = np.mean(dices0)
+    logger.add_attr("d0", d0)
 
     print("Val Dice: {}".format(d0))
     return d0
 
 
 def evaluate_val_kd(args, data_val, best_score, model, snapshot_name, current_epoch):
+    global logger
     model.eval()
     d = validate(model, data_loader=data_val)
+    logger.add_attr("epoch", epoch)
 
     if d > best_score:
         torch.save(
@@ -279,15 +307,16 @@ def train_epoch_kd(
     args,
     current_epoch,
     seg_loss,
-    model_s,
-    model_t,
+    models,
     optimizer,
     scheduler,
     train_data_loader,
-    theta=1,
-    alpha=1,
-    beta=1,
 ):
+    model_s, model_t, model_t_cls = models
+    theta = args.theta
+    alpha = args.alpha
+    beta = args.beta
+    global logger
     losses = AverageMeter()
 
     dices = AverageMeter()
@@ -307,65 +336,153 @@ def train_epoch_kd(
         msks = sample["msk"].cuda(non_blocking=True)
 
         if args.mode != "onlyS":
-            soft_out_t = model_t(imgs)
-            soft_out_t = torch.sigmoid(soft_out_t[:, 0, ...])
+            out_t = model_t(imgs)[:, 0, ...]
+            soft_out_t = torch.sigmoid(out_t / 2)
             feature_t = model_t.conv1(imgs)
             feature_t = model_t.conv2(feature_t)
             feature_t = model_t.conv3(feature_t)
             feature_t = model_t.conv4(feature_t)
             feature_t = model_t.conv5(feature_t)
         if args.mode != "onlyT":
-            soft_out_s = model_s(imgs)
-            soft_out_s = torch.sigmoid(soft_out_s[:, 0, ...])
+            out_s = model_s(imgs)[:, 0, ...]
+            soft_out_s = torch.sigmoid(out_s / 2)
             feature_s = model_s.conv1(imgs)
             feature_s = model_s.conv2(feature_s)
             feature_s = model_s.conv3(feature_s)
             feature_s = model_s.conv4(feature_s)
             feature_s = model_s.conv5(feature_s)
+        if args.mode == "TwoTeacher":
+            # out_t_cls = model_t_cls(imgs)
+            # soft_out_t_cls = channel_five2two(F.softmax(out_t_cls, dim=1))[:, 1, ...]
+            feature_tmp = model_t_cls.conv1(imgs)
+            feature_tmp = model_t_cls.conv2(feature_tmp)
+            feature_tmp = model_t_cls.conv3(feature_tmp)
+            feature_tmp = model_t_cls.conv4(feature_tmp)
+            feature_tmp = model_t_cls.conv5(feature_tmp)
+            feature_t_cls = model_t_cls.conv1(imgs)
+            feature_t_cls = model_t_cls.conv2(feature_t_cls)
+            feature_t_cls = model_t_cls.conv3(feature_t_cls)
+            feature_t_cls = model_t_cls.conv4(feature_t_cls)
+            feature_t_cls = model_t_cls.conv5(feature_t_cls)
+            feature_t_cls = torch.cat([feature_tmp, feature_t_cls], 1)
+
         # parser.add_argument('--loss',default='onlyCls',choices = ['onlyCls','Cls+LWF','Cls+LFL','Cls+LWF+LFL','TwoTeacher'])
-        if args.mode == "T-S":
+        if args.mode in ["T-S", "TwoTeacher"]:
             loss_seg = seg_loss(soft_out_s, msks)
             loss_cls = -torch.log(
-                soft_out_s * msks + (1 - soft_out_s) * (1 - msks)
+                1e-9 + soft_out_s * msks + (1 - soft_out_s) * (1 - msks)
             ).mean()
             loss = theta * loss_cls + loss_seg
 
-            if args.loss != "onlyCls":
-                if "LWF" in args.loss.split("+"):
-                    loss_ko = -(
-                        (soft_out_t * msks + (1 - soft_out_t) * (1 - msks))
-                        * torch.log(soft_out_s * msks + (1 - soft_out_s) * (1 - msks))
+            if args.LWF:
+                loss_ko = -(
+                    (soft_out_t * msks + (1 - soft_out_t) * (1 - msks))
+                    * torch.log(
+                        1e-9 + soft_out_s * msks + (1 - soft_out_s) * (1 - msks)
+                    )
+                ).mean()
+                loss += loss_ko * beta
+            if args.LFL:
+                loss_kf = torch.norm(feature_t - feature_s, p=2, dim=0).mean()
+                loss += loss_kf * alpha
+            if args.KL:
+                print("soft_out_shape", soft_out_s.shape)
+                soft_out_s = torch.sigmoid(out_s)
+                softmax_s = torch.cat(
+                    ((1 - soft_out_s).unsqueeze(1), soft_out_s.unsqueeze(1)), dim=1
+                )
+                soft_out_t = torch.sigmoid(out_t)
+                softmax_t = torch.cat(
+                    ((1 - soft_out_t).unsqueeze(1), soft_out_t.unsqueeze(1)), dim=1
+                )
+                loss_kl = (
+                    (torch.log(1e-9 + softmax_s) - torch.log(1e-9 + softmax_t))
+                    * softmax_s
+                ).mean()
+                loss += loss_kl
+            if args.mode == "TwoTeacher":
+                loss_t_cls = theta * loss_cls
+                # if args.LWF:
+                #     loss_ko_cls = (
+                #         -(
+                #             (soft_out_t * msks + (1 - soft_out_t) * (1 - msks))
+                #             * torch.log(
+                #                 soft_out_s * msks + (1 - soft_out_s) * (1 - msks)
+                #             )
+                #         ).mean()
+                #         / 2.0
+                #     )
+                #     loss_t_cls += beta * loss_ko_cls
+                if args.LFL:
+                    loss_kf_cls = torch.norm(
+                        feature_s - feature_t_cls[:, :2048, ...], p=2, dim=0
                     ).mean()
-                    loss += loss_ko * beta
-                if "LFL" in args.loss.split("+"):
-                    loss_kf = torch.norm(feature_t - feature_s, p=2, dim=0).mean()
+                    loss_t_cls += alpha * loss_kf_cls
+                # if args.KL:
+                #     loss_kl_cls = (
+                #         (torch.log(softmax_s) - F.log_softmax(out_t_cls, dim=1))
+                #         * softmax_s
+                #     ).mean()
+                #     loss_t_cls += loss_kl_cls
+                loss = (1 - args.m) * loss + args.m * loss_t_cls
             with torch.no_grad():
                 dice_sc = 1 - dice_round(soft_out_s, msks[:, 0, ...])
         elif args.mode == "onlyT":
-            loss = seg_loss(soft_out_t, masks)
+            loss = seg_loss(soft_out_t, msks)
             with torch.no_grad():
                 dice_sc = 1 - dice_round(soft_out_t, msks[:, 0, ...])
         else:
-            loss = seg_loss(soft_out_s, masks)
+            loss = seg_loss(soft_out_s, msks)
             with torch.no_grad():
                 dice_sc = 1 - dice_round(soft_out_s, msks[:, 0, ...])
 
         losses.update(loss.item(), imgs.size(0))
 
         dices.update(dice_sc, imgs.size(0))
+        if not args.LWF:
+            loss_ko = torch.tensor(0)
+        if not args.LFL:
+            loss_kf = torch.tensor(0)
+        if not args.KL:
+            loss_kl = torch.tensor(0)
         if args.mode == "T-S":
             iterator.set_description(
-                "epoch: {}; lr {:.7f}; Loss {loss.val:.4f} ({loss.avg:.4f}),Loss_cls {loss_cls:.4f},Loss_kf {loss_kf:.4f},Loss_ko {loss_ko:.4f},Loss_seg {loss_seg:.4f}; Dice {dice.val:.4f} ({dice.avg:.4f})".format(
+                "epoch: {}; lr {:.7f}; Loss {loss.val:.4f} ({loss.avg:.4f}),Loss_cls {loss_cls:.4f},Loss_kf {loss_kf:.4f},Loss_ko {loss_ko:.4f},Loss_kl {loss_kl:.4f},Loss_seg {loss_seg:.4f}; Dice {dice.val:.4f} ({dice.avg:.4f})".format(
                     current_epoch,
                     scheduler.get_lr()[-1],
                     loss=losses,
                     loss_cls=theta * loss_cls.item(),
                     loss_kf=alpha * loss_kf.item(),
                     loss_ko=beta * loss_ko.item(),
+                    loss_kl=loss_kl.item(),
                     loss_seg=loss_seg.item(),
                     dice=dices,
                 )
             )
+        elif args.mode == "TwoTeacher":
+
+            loss_ko_cls = torch.tensor(0)
+            if not args.LFL:
+                loss_kf_cls = torch.tensor(0)
+
+            loss_kl_cls = torch.tensor(0)
+            iterator.set_description(
+                "epoch: {}; lr {:.7f}; Loss {loss.val:.4f} ({loss.avg:.4f}),Loss_cls {loss_cls:.4f},Loss_kf {loss_kf:.4f},Loss_ko {loss_ko:.4f},Loss_kl {loss_kl:.4f},Loss_kf_cls {loss_kf_cls:.4f},Loss_ko_cls {loss_ko_cls:.4f},Loss_kl_cls {loss_kl_cls:.4f},Loss_seg {loss_seg:.4f}; Dice {dice.val:.4f} ({dice.avg:.4f})".format(
+                    current_epoch,
+                    scheduler.get_lr()[-1],
+                    loss=losses,
+                    loss_cls=theta * loss_cls.item(),
+                    loss_kf=alpha * loss_kf.item(),
+                    loss_ko=beta * loss_ko.item(),
+                    loss_kl=loss_kl.item(),
+                    loss_kf_cls=alpha * loss_kf_cls.item(),
+                    loss_ko_cls=beta * loss_ko_cls.item(),
+                    loss_kl_cls=loss_kl_cls.item(),
+                    loss_seg=loss_seg.item(),
+                    dice=dices,
+                )
+            )
+
         else:
             iterator.set_description(
                 "epoch: {}; lr {:.7f}; Loss {loss.val:.4f}; Dice {dice.val:.4f} ({dice.avg:.4f})".format(
@@ -445,6 +562,25 @@ if __name__ == "__main__":
     else:
         model_s = SeResNext50_Unet_Loc_KD().cuda()
         model_t = SeResNext50_Unet_Loc().cuda()
+        if args.mode == "TwoTeacher":
+            model_t_cls = SeResNext50_Unet_Double().cuda()
+            checkpoint = torch.load(
+                "weights/res50_cls_cce_1_tuned_best", map_location="cpu"
+            )
+            loaded_dict = checkpoint["state_dict"]
+            sd = model_t_cls.state_dict()
+            for k in model_t_cls.state_dict():
+                if k in loaded_dict and sd[k].size() == loaded_dict[k].size():
+                    sd[k] = loaded_dict[k]
+            loaded_dict = sd
+            model_t_cls.load_state_dict(loaded_dict)
+            for (
+                key,
+                value,
+            ) in (
+                model_t_cls.named_parameters()
+            ):  # named_parameters()包含网络模块名称 key为模型模块名称 value为模型模块值，可以通过判断模块名称进行对应模块冻结
+                value.requires_grad = False
 
     if args.mode != "onlyT":
         params = model_s.parameters()
@@ -467,7 +603,7 @@ if __name__ == "__main__":
 
     seg_loss = ComboLoss({"dice": 3.0, "focal": 10.0}, per_image=False).cuda()
 
-    if args.mode == "T-S":
+    if args.mode in ["T-S", "TwoTeacher"]:
         checkpoint = torch.load("weights/res50_loc_0_tuned_best", map_location="cpu")
         loaded_dict = checkpoint["state_dict"]
         sd = model_t.state_dict()
@@ -487,60 +623,34 @@ if __name__ == "__main__":
     _cnt = -1
     torch.cuda.empty_cache()
 
-    if args.mode == "T-S":
-        for epoch in range(20):
-            train_epoch_kd(
-                args,
-                epoch,
-                seg_loss,
-                model_s,
-                model_t,
-                optimizer,
-                scheduler,
-                train_data_loader,
-            )
-            if epoch % 1 == 0:
-                _cnt += 1
-                torch.cuda.empty_cache()
-                best_score = evaluate_val_kd(
-                    args, val_data_loader, best_score, model_s, snapshot_name, epoch
-                )
-    elif args.mode == "onlyT":
-        for epoch in range(20):
-            train_epoch_kd(
-                args,
-                epoch,
-                seg_loss,
-                model_t,
-                model_t,
-                optimizer,
-                scheduler,
-                train_data_loader,
-            )
-            if epoch % 1 == 0:
-                _cnt += 1
-                torch.cuda.empty_cache()
-                best_score = evaluate_val_kd(
-                    args, val_data_loader, best_score, model_s, snapshot_name, epoch
-                )
+    if args.mode == "onlyT":
+        model_train = model_t
+        models = (None, model_t, None)
     else:
-        for epoch in range(20):
-            train_epoch_kd(
-                args,
-                epoch,
-                seg_loss,
-                model_s,
-                model_s,
-                optimizer,
-                scheduler,
-                train_data_loader,
+        model_train = model_s
+        if args.mode == "onlyS":
+            models = (model_s, None, None)
+        elif args.mode == "T-S":
+            models = (model_s, model_t, None)
+        else:
+            models = (model_s, model_t, model_t_cls)
+
+    for epoch in range(20):
+        train_epoch_kd(
+            args,
+            epoch,
+            seg_loss,
+            models,
+            optimizer,
+            scheduler,
+            train_data_loader,
+        )
+        if epoch % 1 == 0:
+            _cnt += 1
+            torch.cuda.empty_cache()
+            best_score = evaluate_val_kd(
+                args, val_data_loader, best_score, model_train, snapshot_name, epoch
             )
-            if epoch % 1 == 0:
-                _cnt += 1
-                torch.cuda.empty_cache()
-                best_score = evaluate_val_kd(
-                    args, val_data_loader, best_score, model_s, snapshot_name, epoch
-                )
 
     elapsed = timeit.default_timer() - t0
     print("Time: {:.3f} min".format(elapsed / 60))
