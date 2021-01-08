@@ -47,6 +47,7 @@ from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score
 
 import gc
+from emailbox import EmailBot
 
 from apex import amp
 
@@ -54,7 +55,7 @@ import argparse
 from mongo_logger import Logger
 
 DB = "building_damage_kd"
-COLLECTION = "v0_loc"
+COLLECTION = "v1_loc"
 logger = Logger(DB, COLLECTION)
 
 parser = argparse.ArgumentParser()
@@ -70,7 +71,7 @@ parser.add_argument("--seed", default=1, type=int)
 parser.add_argument("--vis_dev", default=0, type=int)
 parser.add_argument("--batch_size", default=8, type=int)
 parser.add_argument("--val_batch_size", default=4, type=int)
-parser.add_argument("--lr", default=0.0002, type=float)
+parser.add_argument("--lr", default=0.002, type=float)
 parser.add_argument("--weight_decay", default=1e-6, type=float)
 parser.add_argument("--theta", default=1.0, type=float)
 parser.add_argument("--alpha", default=1.0, type=float)
@@ -90,6 +91,14 @@ logger.add_attr("m", args.m, "info")
 logger.add_attr("weight_decay", args.weight_decay, "info")
 logger.insert_into_db("info")
 
+emailbot = EmailBot("settings.json")
+emailbot.sendOne(
+    {
+        "title": "显卡%s训练任务开始训练loc" % args.vis_dev,
+        "content": "mode=%s,LWF=%s,KL=%s,LFL=%s"
+        % (args.mode, args.LWF, args.KL, args.LFL),
+    }
+)
 cv2.setNumThreads(0)
 cv2.ocl.setUseOpenCL(False)
 
@@ -299,6 +308,13 @@ def evaluate_val_kd(args, data_val, best_score, model, snapshot_name, current_ep
         )
         best_score = d
 
+    emailbot = EmailBot("settings.json")
+    emailbot.sendOne(
+        {
+            "title": "显卡%s训练任务进行epoch=%s的测试" % (args.vis_dev, current_epoch),
+            "content": "测试分数%s" % d,
+        }
+    )
     print("score: {}\tscore_best: {}".format(d, best_score))
     return best_score
 
@@ -635,7 +651,7 @@ if __name__ == "__main__":
         else:
             models = (model_s, model_t, model_t_cls)
 
-    for epoch in range(20):
+    for epoch in range(30):
         train_epoch_kd(
             args,
             epoch,
@@ -645,7 +661,7 @@ if __name__ == "__main__":
             scheduler,
             train_data_loader,
         )
-        if epoch % 1 == 0:
+        if epoch % 2 == 0:
             _cnt += 1
             torch.cuda.empty_cache()
             best_score = evaluate_val_kd(
@@ -654,3 +670,7 @@ if __name__ == "__main__":
 
     elapsed = timeit.default_timer() - t0
     print("Time: {:.3f} min".format(elapsed / 60))
+    emailbot = EmailBot("settings.json")
+    emailbot.sendOne(
+        {"title": "显卡%s训练任务完成" % args.vis_dev, "content": "最佳分数%s" % best_score}
+    )

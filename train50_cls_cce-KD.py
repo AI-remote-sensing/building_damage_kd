@@ -44,11 +44,15 @@ from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score
 
 import gc
+from emailbox import EmailBot
+
+
+
 
 from mongo_logger import Logger
 
 DB = "building_damage_kd"
-COLLECTION = "v0_cls"
+COLLECTION = "v1_cls"
 logger = Logger(DB,COLLECTION)
 
 parser = argparse.ArgumentParser()
@@ -65,7 +69,7 @@ parser.add_argument("--vis_dev", default=1, type=int)
 parser.add_argument("--loc_folder", default='pred_loc_val', type=str)
 parser.add_argument("--batch_size", default=5, type=int)
 parser.add_argument("--val_batch_size", default=4, type=int)
-parser.add_argument("--lr", default=0.0002, type=float)
+parser.add_argument("--lr", default=0.002, type=float)
 parser.add_argument("--weight_decay", default=1e-6, type=float)
 parser.add_argument("--theta", default=1.0, type=float)
 parser.add_argument("--alpha", default=1.0, type=float)
@@ -85,6 +89,8 @@ logger.add_attr("m",args.m,'info')
 logger.add_attr("weight_decay",args.weight_decay,'info')
 logger.insert_into_db("info")
 
+emailbot = EmailBot('settings.json')
+emailbot.sendOne({'title':'显卡%s训练任务开始训练cls'%args.vis_dev,'content':'mode=%s,LWF=%s,KL=%s,LFL=%s'%(args.mode,args.LWF,args.KL,args.LFL)})
 cv2.setNumThreads(0)
 cv2.ocl.setUseOpenCL(False)
 
@@ -419,6 +425,8 @@ def evaluate_val_kd(args, data_val, best_score, model, snapshot_name, current_ep
         }, path.join(models_folder, snapshot_name + '_best'))
         best_score = d
 
+    emailbot = EmailBot('settings.json')
+    emailbot.sendOne({'title':'显卡%s训练任务进行epoch=%s的测试'%(args.vis_dev,current_epoch),'content':'测试分数%s'%d})
     print("score: {}\tscore_best: {}".format(d, best_score))
     return best_score
 
@@ -526,7 +534,7 @@ def train_epoch_kd(args, current_epoch, seg_loss, ce_loss, models, optimizer, sc
                     out_t_loc = F.sigmoid(out_t_loc)
                     soft_out_t_loc = torch.cat(((1- out_t_loc).unsqueeze(1),out_t_loc.unsqueeze(1)) ,dim = 1)
                     soft_out_s = channel_five2two(torch.exp(out_s))
-                    soft_out_s = soft_out_s[:,1,...] / torch.sum(soft_out_s,dim=1)
+                    soft_out_s = soft_out_s / torch.sum(soft_out_s,dim=1).unsqueeze(1)
                     loss_kl_loc = ((torch.log(1e-9+soft_out_s) - torch.log(1e-9+soft_out_t_loc)) * soft_out_s).mean()
                     loss_loc += loss_kl_loc
                 
@@ -759,12 +767,14 @@ if __name__ == '__main__':
             models = (model_s, model_t, model_t_loc)
     
 
-    for epoch in range(20):
+    for epoch in range(30):
         train_epoch_kd(args, epoch, seg_loss, ce_loss, models, optimizer, scheduler, train_data_loader)
-        if epoch % 1 == 0:
+        if epoch % 2 == 0:
             torch.cuda.empty_cache()
             best_score = evaluate_val_kd(args , val_data_loader, best_score, model_train, snapshot_name, epoch)
             logger.insert_into_db()
 
     elapsed = timeit.default_timer() - t0
     print('Time: {:.3f} min'.format(elapsed / 60))
+    emailbot = EmailBot('settings.json')
+    emailbot.sendOne({'title':'显卡%s训练任务完成'%args.vis_dev,'content':'最佳分数%s'%best_score})
