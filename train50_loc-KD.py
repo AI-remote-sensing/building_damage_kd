@@ -55,7 +55,7 @@ import argparse
 from mongo_logger import Logger
 
 DB = "building_damage_kd"
-COLLECTION = "v1_loc"
+COLLECTION = "v2_loc"
 logger = Logger(DB, COLLECTION)
 
 parser = argparse.ArgumentParser()
@@ -64,6 +64,7 @@ parser.add_argument(
 )
 parser.add_argument("--LWF", default=0, choices=[0, 1], type=int)
 parser.add_argument("--LFL", default=0, choices=[0, 1], type=int)
+parser.add_argument("--clsLFL", default=0, choices=[0, 1], type=int)
 parser.add_argument("--KL", default=0, choices=[0, 1], type=int)
 parser.add_argument("--dataset", default="/data1/su/app/xview2/building_damage_kd/")
 parser.add_argument("--checkpoint_path", default="weights")
@@ -75,17 +76,20 @@ parser.add_argument("--lr", default=0.002, type=float)
 parser.add_argument("--weight_decay", default=1e-6, type=float)
 parser.add_argument("--theta", default=1.0, type=float)
 parser.add_argument("--alpha", default=1.0, type=float)
+parser.add_argument("--alpha_cls", default=1.0, type=float)
 parser.add_argument("--beta", default=1.0, type=float)
 parser.add_argument("--m", default=0.2, type=float)
 
 args = parser.parse_args()
 logger.add_attr("LWF", args.LWF, "info")
 logger.add_attr("LFL", args.LFL, "info")
+logger.add_attr("clsLFL", args.clsLFL, "info")
 logger.add_attr("KL", args.KL, "info")
 logger.add_attr("mode", args.mode, "info")
 logger.add_attr("lr", args.lr, "info")
 logger.add_attr("theta", args.theta, "info")
 logger.add_attr("alpha", args.alpha, "info")
+logger.add_attr("alpha_cls", args.alpha_cls, "info")
 logger.add_attr("beta", args.beta, "info")
 logger.add_attr("m", args.m, "info")
 logger.add_attr("weight_decay", args.weight_decay, "info")
@@ -95,8 +99,8 @@ emailbot = EmailBot("settings.json")
 emailbot.sendOne(
     {
         "title": "显卡%s训练任务开始训练loc" % args.vis_dev,
-        "content": "mode=%s,LWF=%s,KL=%s,LFL=%s"
-        % (args.mode, args.LWF, args.KL, args.LFL),
+        "content": "mode=%s,LWF=%s,KL=%s,LFL=%s,clsLFL=%s"
+        % (args.mode, args.LWF, args.KL, args.LFL, args.clsLFL),
     }
 )
 cv2.setNumThreads(0)
@@ -346,6 +350,8 @@ def train_epoch_kd(
     else:
         model_s.train(mode=True)
         model_t.eval()
+        if args.mode == "TwoTeacher":
+            model_t_cls.eval()
 
     for i, sample in enumerate(iterator):
         imgs = sample["img"].cuda(non_blocking=True)
@@ -402,7 +408,6 @@ def train_epoch_kd(
                 loss_kf = torch.norm(feature_t - feature_s, p=2, dim=0).mean()
                 loss += loss_kf * alpha
             if args.KL:
-                print("soft_out_shape", soft_out_s.shape)
                 soft_out_s = torch.sigmoid(out_s)
                 softmax_s = torch.cat(
                     ((1 - soft_out_s).unsqueeze(1), soft_out_s.unsqueeze(1)), dim=1
@@ -429,11 +434,11 @@ def train_epoch_kd(
                 #         / 2.0
                 #     )
                 #     loss_t_cls += beta * loss_ko_cls
-                if args.LFL:
+                if args.clsLFL:
                     loss_kf_cls = torch.norm(
                         feature_s - feature_t_cls[:, :2048, ...], p=2, dim=0
                     ).mean()
-                    loss_t_cls += alpha * loss_kf_cls
+                    loss_t_cls += args.alpha_cls * loss_kf_cls
                 # if args.KL:
                 #     loss_kl_cls = (
                 #         (torch.log(softmax_s) - F.log_softmax(out_t_cls, dim=1))
@@ -444,11 +449,21 @@ def train_epoch_kd(
             with torch.no_grad():
                 dice_sc = 1 - dice_round(soft_out_s, msks[:, 0, ...])
         elif args.mode == "onlyT":
-            loss = seg_loss(soft_out_t, msks)
+            loss_seg = seg_loss(soft_out_t, msks)
+            loss_cls = -torch.log(
+                1e-9 + soft_out_t * msks + (1 - soft_out_t) * (1 - msks)
+            ).mean()
+            loss = theta * loss_cls + loss_seg
+
             with torch.no_grad():
                 dice_sc = 1 - dice_round(soft_out_t, msks[:, 0, ...])
         else:
-            loss = seg_loss(soft_out_s, msks)
+            loss_seg = seg_loss(soft_out_s, msks)
+            loss_cls = -torch.log(
+                1e-9 + soft_out_s * msks + (1 - soft_out_s) * (1 - msks)
+            ).mean()
+            loss = theta * loss_cls + loss_seg
+
             with torch.no_grad():
                 dice_sc = 1 - dice_round(soft_out_s, msks[:, 0, ...])
 
@@ -478,7 +493,7 @@ def train_epoch_kd(
         elif args.mode == "TwoTeacher":
 
             loss_ko_cls = torch.tensor(0)
-            if not args.LFL:
+            if not args.clsLFL:
                 loss_kf_cls = torch.tensor(0)
 
             loss_kl_cls = torch.tensor(0)
@@ -538,7 +553,7 @@ if __name__ == "__main__":
     batch_size = args.batch_size
     val_batch_size = args.val_batch_size
 
-    snapshot_name = "res50_loc_{}_KD".format(seed)
+    snapshot_name = "loc_KD_{}_best".format(logger.log_id)
 
     train_idxs, val_idxs = train_test_split(
         np.arange(len(all_files)), test_size=0.1, random_state=seed
@@ -600,7 +615,7 @@ if __name__ == "__main__":
 
     if args.mode != "onlyT":
         params = model_s.parameters()
-        optimizer = AdamW(params, lr=0.00015, weight_decay=1e-6)
+        optimizer = AdamW(params, lr=args.lr, weight_decay=args.weight_decay)
         model_s, optimizer = amp.initialize(model_s, optimizer, opt_level="O0")
         scheduler = lr_scheduler.MultiStepLR(
             optimizer,
@@ -609,7 +624,7 @@ if __name__ == "__main__":
         )
     else:
         params = model_t.parameters()
-        optimizer = AdamW(params, lr=0.00015, weight_decay=1e-6)
+        optimizer = AdamW(params, lr=args.lr, weight_decay=args.weight_decay)
         model_t, optimizer = amp.initialize(model_t, optimizer, opt_level="O0")
         scheduler = lr_scheduler.MultiStepLR(
             optimizer,
@@ -620,7 +635,8 @@ if __name__ == "__main__":
     seg_loss = ComboLoss({"dice": 3.0, "focal": 10.0}, per_image=False).cuda()
 
     if args.mode in ["T-S", "TwoTeacher"]:
-        checkpoint = torch.load("weights/res50_loc_0_tuned_best", map_location="cpu")
+        snap_to_load = "weights/res50_loc_0_tuned_best"
+        checkpoint = torch.load(snap_to_load, map_location="cpu")
         loaded_dict = checkpoint["state_dict"]
         sd = model_t.state_dict()
         for k in model_t.state_dict():
@@ -628,6 +644,11 @@ if __name__ == "__main__":
                 sd[k] = loaded_dict[k]
         loaded_dict = sd
         model_t.load_state_dict(loaded_dict)
+        print(
+            "loaded checkpoint '{}' (epoch {}, best_score {})".format(
+                snap_to_load, checkpoint["epoch"], checkpoint["best_score"]
+            )
+        )
         # named_parameters()包含网络模块名称 key为模型模块名称 value为模型模块值，可以通过判断模块名称进行对应模块冻结
         for key, value in model_t.named_parameters():
             value.requires_grad = False

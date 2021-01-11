@@ -52,14 +52,18 @@ from emailbox import EmailBot
 from mongo_logger import Logger
 
 DB = "building_damage_kd"
-COLLECTION = "v1_cls"
+COLLECTION = "v2_cls"
 logger = Logger(DB,COLLECTION)
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--mode", default="T-S", choices=["onlyT", "onlyS", "T-S","TwoTeacher"])
+parser.add_argument("--transfer",default=0,choices=[0, 1],type=int)
 parser.add_argument("--LWF",default=0,choices=[0, 1],type=int)
+parser.add_argument("--locLWF",default=0,choices=[0, 1],type=int)
 parser.add_argument("--LFL",default=0,choices=[0, 1],type=int)
+parser.add_argument("--locLFL",default=0,choices=[0, 1],type=int)
 parser.add_argument("--KL",default=0,choices=[0, 1],type=int)
+parser.add_argument("--locKL",default=0,choices=[0, 1],type=int)
 parser.add_argument(
     "--dataset", default="/data1/su/app/xview2/building_damage_kd/"
 )
@@ -73,24 +77,32 @@ parser.add_argument("--lr", default=0.002, type=float)
 parser.add_argument("--weight_decay", default=1e-6, type=float)
 parser.add_argument("--theta", default=1.0, type=float)
 parser.add_argument("--alpha", default=1.0, type=float)
+parser.add_argument("--alpha_loc", default=1.0, type=float)
 parser.add_argument("--beta", default=1.0, type=float)
+parser.add_argument("--beta_loc", default=1.0, type=float)
 parser.add_argument("--m", default=0.2, type=float)
 
 args = parser.parse_args()
 logger.add_attr("LWF",args.LWF,'info')
+logger.add_attr("locLWF",args.locLWF,'info')
 logger.add_attr("LFL",args.LFL,'info')
+logger.add_attr("locLFL",args.locLFL,'info')
 logger.add_attr("KL",args.KL,'info')
+logger.add_attr("locKL",args.locKL,'info')
 logger.add_attr("mode",args.mode,'info')
+logger.add_attr("transfer",args.mode,'info')
 logger.add_attr("lr",args.lr,'info')
 logger.add_attr("theta",args.theta,'info')
 logger.add_attr("alpha",args.alpha,'info')
+logger.add_attr("alpha_loc",args.alpha_loc,'info')
 logger.add_attr("beta",args.beta,'info')
+logger.add_attr("beta_loc",args.beta_loc,'info')
 logger.add_attr("m",args.m,'info')
 logger.add_attr("weight_decay",args.weight_decay,'info')
 logger.insert_into_db("info")
 
 emailbot = EmailBot('settings.json')
-emailbot.sendOne({'title':'显卡%s训练任务开始训练cls'%args.vis_dev,'content':'mode=%s,LWF=%s,KL=%s,LFL=%s'%(args.mode,args.LWF,args.KL,args.LFL)})
+emailbot.sendOne({'title':'显卡%s训练任务开始训练cls'%args.vis_dev,'content':'mode=%s,transfer=%s,LWF=%s,KL=%s,LFL=%s,locLWF=%s,locLFL=%s,locKL=%s'%(args.mode,args.transfer,args.LWF,args.KL,args.LFL,args.locLWF,args.locLFL,args.locKL)})
 cv2.setNumThreads(0)
 cv2.ocl.setUseOpenCL(False)
 
@@ -451,6 +463,8 @@ def train_epoch_kd(args, current_epoch, seg_loss, ce_loss, models, optimizer, sc
     else:
         model_s.train(mode=True)
         model_t.eval()
+        if args.mode == "TwoTeacher":
+            model_t_loc.eval()
 
     for i, sample in enumerate(iterator):
         imgs = sample["img"].cuda(non_blocking=True)
@@ -517,7 +531,7 @@ def train_epoch_kd(args, current_epoch, seg_loss, ce_loss, models, optimizer, sc
                 loss += loss_kl
             if args.mode == 'TwoTeacher':
                 loss_loc = theta * loss_cls
-                if args.LWF:
+                if args.locLWF:
                     soft_out_s = channel_five2two(torch.exp(out_s / 2.0))
                     soft_out_s = soft_out_s[:,1,...] / torch.sum(soft_out_s,dim=1)
                     soft_out_t_loc = torch.exp(out_t_loc / 2.0)
@@ -526,11 +540,11 @@ def train_epoch_kd(args, current_epoch, seg_loss, ce_loss, models, optimizer, sc
                         (soft_out_t_loc * msks + (1 - soft_out_t_loc) * (1 - msks))
                         * torch.log(1e-9+ soft_out_s * msks + (1 - soft_out_s) * (1 - msks))
                     ).mean() / 2.0
-                    loss_loc += beta * loss_ko_loc
-                if args.LFL:
+                    loss_loc += args.beta_loc * loss_ko_loc
+                if args.locLFL:
                     loss_kf_loc = torch.norm(feature_s[:,:2048,...]-feature_t_loc,p=2,dim=0).mean()
-                    loss_loc += alpha * loss_kf_loc
-                if args.KL:
+                    loss_loc += args.alpha_loc * loss_kf_loc
+                if args.locKL:
                     out_t_loc = F.sigmoid(out_t_loc)
                     soft_out_t_loc = torch.cat(((1- out_t_loc).unsqueeze(1),out_t_loc.unsqueeze(1)) ,dim = 1)
                     soft_out_s = channel_five2two(torch.exp(out_s))
@@ -596,11 +610,11 @@ def train_epoch_kd(args, current_epoch, seg_loss, ce_loss, models, optimizer, sc
                 "epoch: {}; lr {:.7f}; Loss {loss.val:.4f} ({loss.avg:.4f}),Loss_cls {loss_cls:.4f},Loss_kf {loss_kf:.4f},Loss_ko {loss_ko:.4f},Loss_kl {loss_kl:.4f}; cce_loss {loss1.val:.4f} ({loss1.avg:.4f}); Dice {dice.val:.4f} ({dice.avg:.4f})".format(
                     current_epoch, scheduler.get_lr()[-1], loss=losses,loss_cls=theta * loss_cls.item(),loss_kf=alpha*loss_kf.item(),loss_ko=beta*loss_ko.item(), loss_kl = loss_kl.item(),loss1=losses1,dice=dices))
         elif args.mode == "TwoTeacher":
-            if not args.LWF:
+            if not args.locLWF:
                 loss_ko_loc = torch.tensor(0)
-            if not args.LFL:
+            if not args.locLFL:
                 loss_kf_loc = torch.tensor(0)
-            if not args.KL:
+            if not args.locKL:
                 loss_kl_loc = torch.tensor(0)
             iterator.set_description(
                 "epoch: {}; lr {:.7f}; Loss {loss.val:.4f} ({loss.avg:.4f}),Loss_cls {loss_cls:.4f},Loss_kf {loss_kf:.4f},Loss_ko {loss_ko:.4f},Loss_kl {loss_kl:.4f},Loss_kf_loc {loss_kf_loc:.4f},Loss_ko_loc {loss_ko_loc:.4f},Loss_kl_loc {loss_kl_loc:.4f}; cce_loss {loss1.val:.4f} ({loss1.avg:.4f}); Dice {dice.val:.4f} ({dice.avg:.4f})".format(
@@ -642,7 +656,7 @@ if __name__ == '__main__':
     batch_size = args.batch_size
     val_batch_size = args.val_batch_size
 
-    snapshot_name = 'res50_cls_cce_{}_KD'.format(seed)
+    snapshot_name = 'cls_KD_{}_best'.format(logger.log_id)
 
     file_classes = []
     for fn in tqdm(all_files):
@@ -688,6 +702,9 @@ if __name__ == '__main__':
         if args.mode == "TwoTeacher":
             model_t_loc = SeResNext50_Unet_Loc().cuda()
             checkpoint = torch.load("weights/res50_loc_0_tuned_best", map_location="cpu")
+            print("loaded checkpoint '{}' (epoch {}, best_score {})"
+                    .format("weights/res50_loc_0_tuned_best", checkpoint['epoch'], checkpoint['best_score']))
+
             loaded_dict = checkpoint["state_dict"]
             sd = model_t_loc.state_dict()
             for k in model_t_loc.state_dict():
@@ -715,21 +732,23 @@ if __name__ == '__main__':
         scheduler = lr_scheduler.MultiStepLR(optimizer, milestones=[5, 11, 17, 23, 29, 33, 47, 50, 60, 70, 90, 110, 130, 150, 170, 180, 190], gamma=0.5)
 
     if args.mode in ["T-S", "TwoTeacher"]:
-        snap_to_load = 'res50_loc_{}_KD_best'.format(seed)
-        print("=> loading checkpoint '{}'".format(snap_to_load))
-        checkpoint = torch.load(path.join(models_folder, snap_to_load), map_location='cpu')
+        if args.transfer:
+            snap_to_load = 'res50_loc_{}_KD_best'.format(seed)
+            print("=> loading checkpoint '{}'".format(snap_to_load))
+            checkpoint = torch.load(path.join(models_folder, snap_to_load), map_location='cpu')
+            loaded_dict = checkpoint['state_dict']
+            sd = model_s.state_dict()
+            for k in model_s.state_dict():
+                if k in loaded_dict and sd[k].size() == loaded_dict[k].size():
+                    sd[k] = loaded_dict[k]
+            loaded_dict = sd
+            model_s.load_state_dict(loaded_dict)
+    
+        snap_to_load = 'weights/res50_cls_cce_1_tuned_best'
+        checkpoint = torch.load(snap_to_load,map_location='cpu')
         loaded_dict = checkpoint['state_dict']
-        sd = model_s.state_dict()
-        for k in model_s.state_dict():
-            if k in loaded_dict and sd[k].size() == loaded_dict[k].size():
-                sd[k] = loaded_dict[k]
-        loaded_dict = sd
-        model_s.load_state_dict(loaded_dict)
         print("loaded checkpoint '{}' (epoch {}, best_score {})"
                 .format(snap_to_load, checkpoint['epoch'], checkpoint['best_score']))
-    
-        checkpoint = torch.load('weights/res50_cls_cce_1_tuned_best',map_location='cpu')
-        loaded_dict = checkpoint['state_dict']
         sd = model_t.state_dict()
         for k in model_t.state_dict():
             if k in loaded_dict and sd[k].size() == loaded_dict[k].size():
@@ -741,6 +760,7 @@ if __name__ == '__main__':
         del loaded_dict
         del sd
         del checkpoint
+        
     
     # model_s = nn.DataParallel(model_s).cuda()
     # model_t = nn.DataParallel(model_t).cuda()
