@@ -27,7 +27,7 @@ import json
 
 masks_dir = 'masks'
 
-train_dirs = ['train', 'tier3']
+train_dirs = ['train','tier3', 'test', 'hold']
 
 
 def mask_for_polygon(poly, im_size=(1024, 1024)):

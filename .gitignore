@@ -1,0 +1,12 @@
+test
+tier3
+train
+hold
+weights
+log
+pred_loc_val
+zoo/*
+.*
+__*
+settings.json
+res50_loc_1_KD_best
