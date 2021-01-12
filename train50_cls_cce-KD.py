@@ -731,18 +731,20 @@ if __name__ == '__main__':
         model_t, optimizer = amp.initialize(model_t, optimizer, opt_level="O0")
         scheduler = lr_scheduler.MultiStepLR(optimizer, milestones=[5, 11, 17, 23, 29, 33, 47, 50, 60, 70, 90, 110, 130, 150, 170, 180, 190], gamma=0.5)
 
+    if args.transfer and args.mode !='onlyT':
+        snap_to_load = 'res50_loc_{}_KD_best'.format(seed)
+        print("=> loading checkpoint '{}'".format(snap_to_load))
+        checkpoint = torch.load(path.join(models_folder, snap_to_load), map_location='cpu')
+        loaded_dict = checkpoint['state_dict']
+        sd = model_s.state_dict()
+        for k in model_s.state_dict():
+            if k in loaded_dict and sd[k].size() == loaded_dict[k].size():
+                sd[k] = loaded_dict[k]
+        loaded_dict = sd
+        model_s.load_state_dict(loaded_dict)
+
     if args.mode in ["T-S", "TwoTeacher"]:
-        if args.transfer:
-            snap_to_load = 'res50_loc_{}_KD_best'.format(seed)
-            print("=> loading checkpoint '{}'".format(snap_to_load))
-            checkpoint = torch.load(path.join(models_folder, snap_to_load), map_location='cpu')
-            loaded_dict = checkpoint['state_dict']
-            sd = model_s.state_dict()
-            for k in model_s.state_dict():
-                if k in loaded_dict and sd[k].size() == loaded_dict[k].size():
-                    sd[k] = loaded_dict[k]
-            loaded_dict = sd
-            model_s.load_state_dict(loaded_dict)
+
     
         snap_to_load = 'weights/res50_cls_cce_1_tuned_best'
         checkpoint = torch.load(snap_to_load,map_location='cpu')
