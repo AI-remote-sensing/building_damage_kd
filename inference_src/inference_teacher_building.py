@@ -2,6 +2,7 @@ import os
 
 from os import path, makedirs, listdir
 import sys
+sys.path.append("../train_src") 
 import numpy as np
 np.random.seed(1)
 import random
@@ -20,14 +21,14 @@ import cv2
 
 from zoo.models import SeResNext50_Unet_Loc
 
-from utils import *
+from util.utils import *
 
 cv2.setNumThreads(0)
 cv2.ocl.setUseOpenCL(False)
 
-test_dir = 'test/images'
-pred_folder = 'pred50_loc_tuned'
-models_folder = 'weights'
+test_dir = '../data/test/images'
+pred_folder = '../pred50_loc_tuned'
+models_folder = '../weights'
 
 if __name__ == '__main__':
     t0 = timeit.default_timer()

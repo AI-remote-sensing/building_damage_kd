@@ -19,8 +19,8 @@ import torch.optim.lr_scheduler as lr_scheduler
 
 from apex import amp
 
-from adamw import AdamW
-from losses import dice_round, ComboLoss
+from util.adamw import AdamW
+from util.losses import dice_round, ComboLoss
 
 import pandas as pd
 from tqdm import tqdm
@@ -31,7 +31,7 @@ from zoo.models import SeResNext50_Unet_Double
 
 from imgaug import augmenters as iaa
 
-from utils import *
+from util.utils import *
 
 from skimage.morphology import square, dilation
 
@@ -44,21 +44,28 @@ import gc
 cv2.setNumThreads(0)
 cv2.ocl.setUseOpenCL(False)
 
-train_dirs = ['train', 'tier3']
+train_dirs = ['../train','../hold','../test']
 
-models_folder = 'weights'
+models_folder = '../weights'
 
-loc_folder = 'pred_loc_val'
+loc_folder = '../pred_loc_val'
 
 input_shape = (512, 512)
 
 
 all_files = []
+test_files = []
+val_files = []
 for d in train_dirs:
     for f in sorted(listdir(path.join(d, 'images'))):
         if '_pre_disaster.png' in f:
-            all_files.append(path.join(d, 'images', f))
-train_len = len(all_files)
+            if d == 'test':
+                test_files.append(path.join(d, 'images', f))
+            elif d == 'hold':
+                val_files.append(path.join(d, 'images', f))
+            else:
+                all_files.append(path.join(d, 'images', f))
+                
 
 
 class TrainData(Dataset):
@@ -76,11 +83,10 @@ class TrainData(Dataset):
         fn = all_files[_idx]
 
         img = cv2.imread(fn, cv2.IMREAD_COLOR)
-        img2 = cv2.imread(fn.replace('_pre_', '_post_'), cv2.IMREAD_COLOR)
+        img2 = cv2.imread(fn.replace('_pre_disaster', '_post_disaster'), cv2.IMREAD_COLOR)
 
         msk0 = cv2.imread(fn.replace('/images/', '/masks/'), cv2.IMREAD_UNCHANGED)
         lbl_msk1 = cv2.imread(fn.replace('/images/', '/masks/').replace('_pre_disaster', '_post_disaster'), cv2.IMREAD_UNCHANGED)
-
         msk1 = np.zeros_like(lbl_msk1)
         msk2 = np.zeros_like(lbl_msk1)
         msk3 = np.zeros_like(lbl_msk1)
@@ -90,7 +96,7 @@ class TrainData(Dataset):
         msk4[lbl_msk1 == 4] = 255
         msk1[lbl_msk1 == 1] = 255
 
-        if random.random() > 0.7:
+        if random.random() > 0.5:
             img = img[::-1, ...]
             img2 = img2[::-1, ...]
             msk0 = msk0[::-1, ...]
@@ -99,7 +105,7 @@ class TrainData(Dataset):
             msk3 = msk3[::-1, ...]
             msk4 = msk4[::-1, ...]
 
-        if random.random() > 0.3:
+        if random.random() > 0.05:
             rot = random.randrange(4)
             if rot > 0:
                 img = np.rot90(img, k=rot)
@@ -110,7 +116,7 @@ class TrainData(Dataset):
                 msk3 = np.rot90(msk3, k=rot)
                 msk4 = np.rot90(msk4, k=rot)
                     
-        if random.random() > 0.99:
+        if random.random() > 0.8:
             shift_pnt = (random.randint(-320, 320), random.randint(-320, 320))
             img = shift_image(img, shift_pnt)
             img2 = shift_image(img2, shift_pnt)
@@ -120,7 +126,7 @@ class TrainData(Dataset):
             msk3 = shift_image(msk3, shift_pnt)
             msk4 = shift_image(msk4, shift_pnt)
             
-        if random.random() > 0.5:
+        if random.random() > 0.2:
             rot_pnt =  (img.shape[0] // 2 + random.randint(-320, 320), img.shape[1] // 2 + random.randint(-320, 320))
             scale = 0.9 + random.random() * 0.2
             angle = random.randint(0, 20) - 10
@@ -134,8 +140,8 @@ class TrainData(Dataset):
                 msk4 = rotate_image(msk4, angle, scale, rot_pnt)
 
         crop_size = input_shape[0]
-        if random.random() > 0.5:
-            crop_size = random.randint(int(input_shape[0] / 1.1), int(input_shape[0] / 0.9))
+        if random.random() > 0.1:
+            crop_size = random.randint(int(input_shape[0] / 1.15), int(input_shape[0] / 0.85))
 
         bst_x0 = random.randint(0, img.shape[1] - crop_size)
         bst_y0 = random.randint(0, img.shape[0] - crop_size)
@@ -169,52 +175,52 @@ class TrainData(Dataset):
             msk4 = cv2.resize(msk4, input_shape, interpolation=cv2.INTER_LINEAR)
             
 
-        if random.random() > 0.99:
+        if random.random() > 0.96:
             img = shift_channels(img, random.randint(-5, 5), random.randint(-5, 5), random.randint(-5, 5))
-        elif random.random() > 0.99:
+        elif random.random() > 0.96:
             img2 = shift_channels(img2, random.randint(-5, 5), random.randint(-5, 5), random.randint(-5, 5))
 
-        if random.random() > 0.99:
+        if random.random() > 0.96:
             img = change_hsv(img, random.randint(-5, 5), random.randint(-5, 5), random.randint(-5, 5))
-        elif random.random() > 0.99:
+        elif random.random() > 0.96:
             img2 = change_hsv(img2, random.randint(-5, 5), random.randint(-5, 5), random.randint(-5, 5))
 
-        if random.random() > 0.99:
-            if random.random() > 0.99:
+        if random.random() > 0.9:
+            if random.random() > 0.96:
                 img = clahe(img)
-            elif random.random() > 0.99:
+            elif random.random() > 0.96:
                 img = gauss_noise(img)
-            elif random.random() > 0.99:
+            elif random.random() > 0.96:
                 img = cv2.blur(img, (3, 3))
-        elif random.random() > 0.99:
-            if random.random() > 0.99:
+        elif random.random() > 0.9:
+            if random.random() > 0.96:
                 img = saturation(img, 0.9 + random.random() * 0.2)
-            elif random.random() > 0.99:
+            elif random.random() > 0.96:
                 img = brightness(img, 0.9 + random.random() * 0.2)
-            elif random.random() > 0.99:
+            elif random.random() > 0.96:
                 img = contrast(img, 0.9 + random.random() * 0.2)
 
-        if random.random() > 0.99:
-            if random.random() > 0.99:
+        if random.random() > 0.9:
+            if random.random() > 0.96:
                 img2 = clahe(img2)
-            elif random.random() > 0.99:
+            elif random.random() > 0.96:
                 img2 = gauss_noise(img2)
-            elif random.random() > 0.99:
+            elif random.random() > 0.96:
                 img2 = cv2.blur(img2, (3, 3))
-        elif random.random() > 0.99:
-            if random.random() > 0.99:
+        elif random.random() > 0.9:
+            if random.random() > 0.96:
                 img2 = saturation(img2, 0.9 + random.random() * 0.2)
-            elif random.random() > 0.99:
+            elif random.random() > 0.96:
                 img2 = brightness(img2, 0.9 + random.random() * 0.2)
-            elif random.random() > 0.99:
+            elif random.random() > 0.96:
                 img2 = contrast(img2, 0.9 + random.random() * 0.2)
 
                 
-        if random.random() > 0.99:
+        if random.random() > 0.96:
             el_det = self.elastic.to_deterministic()
             img = el_det.augment_image(img)
 
-        if random.random() > 0.99:
+        if random.random() > 0.96:
             el_det = self.elastic.to_deterministic()
             img2 = el_det.augment_image(img2)
 
@@ -262,15 +268,15 @@ class ValData(Dataset):
     def __getitem__(self, idx):
         _idx = self.image_idxs[idx]
 
-        fn = all_files[_idx]
+        fn = val_files[_idx]
 
         img = cv2.imread(fn, cv2.IMREAD_COLOR)
-        img2 = cv2.imread(fn.replace('_pre_', '_post_'), cv2.IMREAD_COLOR)
+        img2 = cv2.imread(fn.replace('_pre_disaster', '_post_disaster'), cv2.IMREAD_COLOR)
+
+        #msk_loc = cv2.imread(path.join(loc_folder, '{0}.png'.format(fn.split('/')[-1].replace('.png', '_part1.png'))), cv2.IMREAD_UNCHANGED) > (0.3*255)
 
         msk0 = cv2.imread(fn.replace('/images/', '/masks/'), cv2.IMREAD_UNCHANGED)
         lbl_msk1 = cv2.imread(fn.replace('/images/', '/masks/').replace('_pre_disaster', '_post_disaster'), cv2.IMREAD_UNCHANGED)
-        msk_loc = cv2.imread(path.join(loc_folder, '{0}.png'.format(fn.split('/')[-1].replace('.png', '_part1.png'))), cv2.IMREAD_UNCHANGED) > (0.3*255)
-        
         msk1 = np.zeros_like(lbl_msk1)
         msk2 = np.zeros_like(lbl_msk1)
         msk3 = np.zeros_like(lbl_msk1)
@@ -299,9 +305,59 @@ class ValData(Dataset):
         img = torch.from_numpy(img.transpose((2, 0, 1))).float()
         msk = torch.from_numpy(msk.transpose((2, 0, 1))).long()
 
-        sample = {'img': img, 'msk': msk, 'lbl_msk': lbl_msk, 'fn': fn, 'msk_loc': msk_loc}
+        sample = {'img': img, 'msk': msk, 'lbl_msk': lbl_msk, 'fn': fn, 'msk_loc': 0}
         return sample
 
+class TestData(Dataset):
+    def __init__(self, image_idxs):
+        super().__init__()
+        self.image_idxs = image_idxs
+
+    def __len__(self):
+        return len(self.image_idxs)
+
+    def __getitem__(self, idx):
+        _idx = self.image_idxs[idx]
+
+        fn = test_files[_idx]
+
+        img = cv2.imread(fn, cv2.IMREAD_COLOR)
+        img2 = cv2.imread(fn.replace('_pre_disaster', '_post_disaster'), cv2.IMREAD_COLOR)
+
+        #msk_loc = cv2.imread(path.join(loc_folder, '{0}.png'.format(fn.split('/')[-1].replace('.png', '_part1.png'))), cv2.IMREAD_UNCHANGED) > (0.3*255)
+
+        msk0 = cv2.imread(fn.replace('/images/', '/masks/'), cv2.IMREAD_UNCHANGED)
+        lbl_msk1 = cv2.imread(fn.replace('/images/', '/masks/').replace('_pre_disaster', '_post_disaster'), cv2.IMREAD_UNCHANGED)
+        msk1 = np.zeros_like(lbl_msk1)
+        msk2 = np.zeros_like(lbl_msk1)
+        msk3 = np.zeros_like(lbl_msk1)
+        msk4 = np.zeros_like(lbl_msk1)
+        msk1[lbl_msk1 == 1] = 255
+        msk2[lbl_msk1 == 2] = 255
+        msk3[lbl_msk1 == 3] = 255
+        msk4[lbl_msk1 == 4] = 255
+
+        msk0 = msk0[..., np.newaxis]
+        msk1 = msk1[..., np.newaxis]
+        msk2 = msk2[..., np.newaxis]
+        msk3 = msk3[..., np.newaxis]
+        msk4 = msk4[..., np.newaxis]
+
+        msk = np.concatenate([msk0, msk1, msk2, msk3, msk4], axis=2)
+        msk = (msk > 127)
+
+        msk = msk * 1
+
+        lbl_msk = msk[..., 1:].argmax(axis=2)
+        
+        img = np.concatenate([img, img2], axis=2)
+        img = preprocess_inputs(img)
+
+        img = torch.from_numpy(img.transpose((2, 0, 1))).float()
+        msk = torch.from_numpy(msk.transpose((2, 0, 1))).long()
+
+        sample = {'img': img, 'msk': msk, 'lbl_msk': lbl_msk, 'fn': fn, 'msk_loc': 0}
+        return sample
 
 def validate(net, data_loader):
     dices0 = []
@@ -310,33 +366,34 @@ def validate(net, data_loader):
     fp = np.zeros((5,))
     fn = np.zeros((5,))
 
-    _thr = 0.3
+    _thr = 0.5
 
     with torch.no_grad():
         for i, sample in enumerate(tqdm(data_loader)):
             msks = sample["msk"].numpy()
             lbl_msk = sample["lbl_msk"].numpy()
             imgs = sample["img"].cuda(non_blocking=True)
-            msk_loc = sample["msk_loc"].numpy() * 1
+            #msk_loc = sample["msk_loc"].numpy() * 1
             out = model(imgs)
 
-            msk_pred = msk_loc
-            msk_damage_pred = torch.softmax(out, dim=1).cpu().numpy()[:, 1:, ...]
+            #msk_pred = msk_loc
+            msk_pred = torch.sigmoid(out[:, 0, ...]).cpu().numpy()
+            msk_damage_pred = torch.softmax(out[:, 1:, ...], dim=1).cpu().numpy()[:, 1:, ...]
             
-            for j in range(msks.shape[0]):      
-                tp[4] += np.logical_and(msks[j, 0] > 0, msk_pred[j] > 0).sum()
-                fn[4] += np.logical_and(msks[j, 0] < 1, msk_pred[j] > 0).sum()
-                fp[4] += np.logical_and(msks[j, 0] > 0, msk_pred[j] < 1).sum()
+            for j in range(msks.shape[0]):
+                tp[4] += np.logical_and(msks[j, 0] > 0, msk_pred[j] > _thr).sum()
+                fp[4] += np.logical_and(msks[j, 0] < 1, msk_pred[j] > _thr).sum()
+                fn[4] += np.logical_and(msks[j, 0] > 0, msk_pred[j] < _thr).sum()
 
 
-                targ = lbl_msk[j][msks[j, 0] > 0]
+                targ = lbl_msk[j]#[msks[j, 0] > 0]
                 pred = msk_damage_pred[j].argmax(axis=0)
                 pred = pred * (msk_pred[j] > _thr)
-                pred = pred[msks[j, 0] > 0]
+                pred = pred#[msks[j, 0] > 0]
                 for c in range(4):
-                    tp[c] += np.logical_and(pred == c, targ == c).sum()
-                    fn[c] += np.logical_and(pred != c, targ == c).sum()
-                    fp[c] += np.logical_and(pred == c, targ != c).sum()
+                    tp[c] += np.logical_and(pred == c , targ == c + 1).sum()
+                    fn[c] += np.logical_and(pred != c , targ == c + 1).sum()
+                    fp[c] += np.logical_and(pred == c , targ != c + 1).sum()
 
     d0 = 2 * tp[4] / (2 * tp[4] + fp[4] + fn[4])
 
@@ -347,7 +404,10 @@ def validate(net, data_loader):
     f1 = 4 / np.sum(1.0 / (f1_sc + 1e-6))
 
     sc = 0.3 * d0 + 0.7 * f1
-    print("Val Score: {}, Dice: {}, F1: {}, F1_0: {}, F1_1: {}, F1_2: {}, F1_3: {}".format(sc, d0, f1, f1_sc[0], f1_sc[1], f1_sc[2], f1_sc[3]))
+    print("Val Score: {}, F1_loc {} (tp {}, fn {}, fp {}) F1: {} , F1_0: {} (tp {}, fn {}, fp {}), F1_1: {} (tp {}, fn {}, fp {}), F1_2: {}  (tp {}, fn {}, fp {}), F1_3: {}  (tp {}, fn {}, fp {})"\
+        .format(sc, d0, tp[4], fn[4], fp[4],f1, f1_sc[0] ,tp[0], fn[0], fp[0],\
+             f1_sc[1],tp[1], fn[1], fp[1], f1_sc[2],tp[2], fn[2], fp[2],\
+                 f1_sc[3], tp[3], fn[3], fp[3]))
     return sc
 
 
@@ -390,14 +450,14 @@ def train_epoch(current_epoch, seg_loss, ce_loss, model, optimizer, scheduler, t
 
         loss5 = ce_loss(out, lbl_msk)
 
-        loss = 0.1 * loss0 + 0.1 * loss1 + 0.3 * loss2 + 0.3 * loss3 + 0.2 * loss4 + loss5 * 11
+        loss = 1 * loss0 + 0.1 * loss1 + 0.5 * loss2 + 0.4 * loss3 + 0.2 * loss4 + loss5 * 5
 
         with torch.no_grad():
             _probs = 1 - torch.sigmoid(out[:, 0, ...])
             dice_sc = 1 - dice_round(_probs, 1 - msks[:, 0, ...])
 
         losses.update(loss.item(), imgs.size(0))
-        losses1.update(loss5.item(), imgs.size(0)) #loss5
+        losses1.update(loss5.item(), imgs.size(0))
 
         dices.update(dice_sc, imgs.size(0))
 
@@ -406,6 +466,7 @@ def train_epoch(current_epoch, seg_loss, ce_loss, model, optimizer, scheduler, t
                 current_epoch, scheduler.get_lr()[-1], loss=losses, loss1=losses1, dice=dices))
         
         optimizer.zero_grad()
+        # loss.backward()
         with amp.scale_loss(loss, optimizer) as scaled_loss:
             scaled_loss.backward()
         torch.nn.utils.clip_grad_norm_(amp.master_params(optimizer), 0.999)
@@ -423,17 +484,17 @@ if __name__ == '__main__':
     makedirs(models_folder, exist_ok=True)
     
     seed = int(sys.argv[1])
-    # vis_dev = sys.argv[2]
+    vis_dev = sys.argv[2]
 
     # os.environ['CUDA_DEVICE_ORDER'] = 'PCI_BUS_ID'
-    # os.environ["CUDA_VISIBLE_DEVICES"] = vis_dev
+    os.environ["CUDA_VISIBLE_DEVICES"] = vis_dev
 
     cudnn.benchmark = True
 
-    batch_size = 16
+    batch_size = 8
     val_batch_size = 4
 
-    snapshot_name = 'res50_cls_cce_{}_tuned'.format(seed)
+    snapshot_name = 'res50_cls_cce_{}_0'.format(seed)
 
     file_classes = []
     for fn in tqdm(all_files):
@@ -444,68 +505,75 @@ if __name__ == '__main__':
         file_classes.append(fl)
     file_classes = np.asarray(file_classes)
 
-    _, val_idxs = train_test_split(np.arange(train_len), test_size=0.1, random_state=seed)
+    #train_idxs0, val_idxs = train_test_split(np.arange(len(all_files)), test_size=0.1, random_state=seed)
 
-    np.random.seed(seed + 131313)
-    random.seed(seed + 131313)
+    np.random.seed(seed + 1234)
+    random.seed(seed + 1234)
 
     train_idxs = []
-    for i in np.arange(len(all_files)):
+    for i in list(range(len(all_files))):
         train_idxs.append(i)
         if file_classes[i, 1:].max():
+            train_idxs.append(i)
+        if file_classes[i, 1:3].max():
             train_idxs.append(i)
     train_idxs = np.asarray(train_idxs)
 
     steps_per_epoch = len(train_idxs) // batch_size
-    validation_steps = len(val_idxs) // val_batch_size
+    validation_steps = len(val_files)//5// val_batch_size
 
     print('steps_per_epoch', steps_per_epoch, 'validation_steps', validation_steps)
 
     data_train = TrainData(train_idxs)
-    val_train = ValData(val_idxs)
-
+    val_train = ValData(list(range(len(val_files)//5)))
+    test_data = TestData(list(range(len(test_files))))
     train_data_loader = DataLoader(data_train, batch_size=batch_size, num_workers=6, shuffle=True, pin_memory=False, drop_last=True)
     val_data_loader = DataLoader(val_train, batch_size=val_batch_size, num_workers=6, shuffle=False, pin_memory=False)
+    test_data_loader = DataLoader(test_data, batch_size=val_batch_size, num_workers=6, shuffle=False, pin_memory=False)
 
     model = SeResNext50_Unet_Double().cuda()
 
     params = model.parameters()
 
-    optimizer = AdamW(params, lr=0.00001, weight_decay=1e-6)
+    optimizer = AdamW(params, lr=0.0002, weight_decay=1e-6)
     
-    model, optimizer = amp.initialize(model, optimizer, opt_level="O1")
+    model, optimizer = amp.initialize(model, optimizer, opt_level="O0")
 
-    scheduler = lr_scheduler.MultiStepLR(optimizer, milestones=[1, 2, 3, 4, 5, 7, 9, 11, 17, 23, 29, 33, 47, 50, 60, 70, 90, 110, 130, 150, 170, 180, 190], gamma=0.5)
+    scheduler = lr_scheduler.MultiStepLR(optimizer, milestones=[5, 11, 17, 23, 29, 33, 47, 50, 60, 70, 90, 110, 130, 150, 170, 180, 190], gamma=0.5)
 
-    model = nn.DataParallel(model).cuda()
+    # snap_to_load = 'res50_cls_cce_{}_0_best'.format(seed)
+    # print("=> loading checkpoint '{}'".format(snap_to_load))
+    # checkpoint = torch.load(path.join(models_folder, snap_to_load), map_location='cpu')
+    # loaded_dict = checkpoint['state_dict']
+    # sd = model.state_dict()
+    # for k in model.state_dict():
+    #     if k in loaded_dict and sd[k].size() == loaded_dict[k].size():
+    #         sd[k] = loaded_dict[k]
+    # loaded_dict = sd
+    # model.load_state_dict(loaded_dict)
+    # print("loaded checkpoint '{}' (epoch {}, best_score {})"
+    #         .format(snap_to_load, checkpoint['epoch'], checkpoint['best_score']))
+    # del loaded_dict
+    # del sd
+    # del checkpoint
 
-    snap_to_load = 'res50_cls_cce_{}_0_best'.format(seed)
-    print("=> loading checkpoint '{}'".format(snap_to_load))
-    checkpoint = torch.load(path.join(models_folder, snap_to_load), map_location='cpu')
-    loaded_dict = checkpoint['state_dict']
-    sd = model.state_dict()
-    for k in model.state_dict():
-        if k in loaded_dict and sd[k].size() == loaded_dict[k].size():
-            sd[k] = loaded_dict[k]
-    loaded_dict = sd
-    model.load_state_dict(loaded_dict)
-    print("loaded checkpoint '{}' (epoch {}, best_score {})"
-            .format(snap_to_load, checkpoint['epoch'], checkpoint['best_score']))
-    del loaded_dict
-    del sd
-    del checkpoint
     gc.collect()
     torch.cuda.empty_cache()
+
+    model = nn.DataParallel(model).cuda()
 
     seg_loss = ComboLoss({'dice': 0.5, 'focal': 2.0}, per_image=False).cuda()
     ce_loss = nn.CrossEntropyLoss().cuda()
 
     best_score = 0
     torch.cuda.empty_cache()
-    for epoch in range(2):
+    for epoch in range(50):
         train_epoch(epoch, seg_loss, ce_loss, model, optimizer, scheduler, train_data_loader)
-        torch.cuda.empty_cache()
-        best_score = evaluate_val(val_data_loader, best_score, model, snapshot_name, epoch)
+        if epoch % 10 == 0:
+            torch.cuda.empty_cache()
+            best_score = evaluate_val(val_data_loader, best_score, model, snapshot_name, epoch)
+
+    evaluate_val(test_data_loader, best_score, model, snapshot_name, epoch)
 
     elapsed = timeit.default_timer() - t0
     print('Time: {:.3f} min'.format(elapsed / 60))

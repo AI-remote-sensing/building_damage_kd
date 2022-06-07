@@ -2,6 +2,7 @@ import os
 
 from os import path, makedirs, listdir
 import sys
+sys.path.append("../train_src") 
 import numpy as np
 np.random.seed(1)
 import random
@@ -20,17 +21,17 @@ import cv2
 
 from zoo.models import SeResNext50_Unet_Loc, Dpn92_Unet_Loc, Res34_Unet_Loc, SeNet154_Unet_Loc
 
-from utils import *
+from util.utils import *
 
 from sklearn.model_selection import train_test_split
 
 cv2.setNumThreads(0)
 cv2.ocl.setUseOpenCL(False)
 
-test_dir = 'test/images'
-pred_folder = 'pred_loc_val'
-train_dirs = ['train', 'tier3']
-models_folder = 'weights'
+test_dir = '../data/test/images'
+pred_folder = '../pred_loc_val'
+train_dirs = ['../data/train', '../data/tier3']
+models_folder = '../weights'
 
 all_files = []
 for d in train_dirs:

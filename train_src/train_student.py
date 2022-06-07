@@ -23,8 +23,8 @@ import torch.optim.lr_scheduler as lr_scheduler
 
 from apex import amp
 
-from adamw import AdamW
-from losses import dice_round, ComboLoss
+from util.adamw import AdamW
+from util.losses import dice_round, ComboLoss
 
 import pandas as pd
 from tqdm import tqdm
@@ -35,7 +35,7 @@ from zoo.models import SeResNext50_Unet_Double,SeResNext50_Unet_Double_KD, SeRes
 
 from imgaug import augmenters as iaa
 
-from utils import *
+from util.utils import *
 
 from skimage.morphology import square, dilation
 
@@ -44,12 +44,12 @@ from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score
 
 import gc
-from emailbox import EmailBot
+from util.emailbox import EmailBot
 
 
 
 
-from mongo_logger import Logger
+from util.mongo_logger import Logger
 
 DB = "building_damage_kd"
 COLLECTION = "v3_cls"
@@ -65,12 +65,12 @@ parser.add_argument("--locLFL",default=0,choices=[0, 1],type=int)
 parser.add_argument("--KL",default=0,choices=[0, 1],type=int)
 parser.add_argument("--locKL",default=0,choices=[0, 1],type=int)
 parser.add_argument(
-    "--dataset", default="/data1/su/app/xview2/building_damage_kd/"
+    "--dataset", default="../data"
 )
-parser.add_argument("--checkpoint_path", default="weights")
+parser.add_argument("--checkpoint_path", default="../weights")
 parser.add_argument("--seed", default=1, type=int)
 parser.add_argument("--vis_dev", default=1, type=int)
-parser.add_argument("--loc_folder", default='pred_loc_val', type=str)
+parser.add_argument("--loc_folder", default='../pred_loc_val', type=str)
 parser.add_argument("--batch_size", default=5, type=int)
 parser.add_argument("--val_batch_size", default=4, type=int)
 parser.add_argument("--lr", default=0.002, type=float)
@@ -101,7 +101,7 @@ logger.add_attr("m",args.m,'info')
 logger.add_attr("weight_decay",args.weight_decay,'info')
 logger.insert_into_db("info")
 
-emailbot = EmailBot('settings.json')
+emailbot = EmailBot('../settings.json')
 emailbot.sendOne({'title':'显卡%s训练任务开始训练cls'%args.vis_dev,'content':'mode=%s,transfer=%s,LWF=%s,KL=%s,LFL=%s,locLWF=%s,locLFL=%s,locKL=%s'%(args.mode,args.transfer,args.LWF,args.KL,args.LFL,args.locLWF,args.locLFL,args.locKL)})
 cv2.setNumThreads(0)
 cv2.ocl.setUseOpenCL(False)
@@ -437,7 +437,7 @@ def evaluate_val_kd(args, data_val, best_score, model, snapshot_name, current_ep
         }, path.join(models_folder, snapshot_name + '_best'))
         best_score = d
 
-    emailbot = EmailBot('settings.json')
+    emailbot = EmailBot('../settings.json')
     emailbot.sendOne({'title':'显卡%s训练任务进行epoch=%s的测试'%(args.vis_dev,current_epoch),'content':'测试分数%s'%d})
     print("score: {}\tscore_best: {}".format(d, best_score))
     return best_score
@@ -798,5 +798,5 @@ if __name__ == '__main__':
 
     elapsed = timeit.default_timer() - t0
     print('Time: {:.3f} min'.format(elapsed / 60))
-    emailbot = EmailBot('settings.json')
+    emailbot = EmailBot('../settings.json')
     emailbot.sendOne({'title':'显卡%s训练任务完成'%args.vis_dev,'content':'最佳分数%s'%best_score})

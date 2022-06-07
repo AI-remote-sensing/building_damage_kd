@@ -2,8 +2,6 @@ test
 tier3
 train
 hold
-weights
-log
 pred_loc_val
 zoo/*
 .*

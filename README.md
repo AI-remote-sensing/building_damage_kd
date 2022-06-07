@@ -1,32 +1,54 @@
-# xview2 1st place solution
-1st place solution for "xView2: Assess Building Damage" challenge. https://www.xview2.org
+# Knowldge Distillation for Building Damage Recognition 
 
-# Introduction to Solution
+We develop ensemble and dual-teacher knowledge distillation methods based on the "xView2: Assess Building Damage" dataset and its 1st place solution. Our paper is under reviewing.
 
-Solution developed using this environment:
- - Python 3 (based on Anaconda installation)
- - Pytorch 1.1.0+ and torchvision 0.3.0+ 
- - Nvidia apex https://github.com/NVIDIA/apex
- - https://github.com/skvark/opencv-python
- - https://github.com/aleju/imgaug
+## Environments
+
+### basic: 
+python=3.9
+mongodb database(for easily saving the experiment result)
+
+### pip package:
+numpy==1.22.4
+torch==1.11.0
+sklearn==1.1.1
+pandas==1.4.2
+tqdm==4.64.0
+opencv-python==4.5.5.64
+torchvision==0.12.0
+imgaug==0.4.0
+seaborn==0.11.2
+pymongo==4.1.1
+
+### src install package:
+apex from NVIDIA(Notice: pip install apex is wrong)
+```
+git clone https://github.com/NVIDIA/apex
+cd apex
+# pip install -v --no-cache-dir --global-option="--cpp_ext" --global-option="--cuda_ext" ./
+# build with C++, you may meet some dependency problem, use the following
+pip install -v --no-cache-dir ./
+```
+Luckily, you get no error output:
+> Installing collected packages: apex
+> Successfully installed apex-0.1
+
+### config setting
+
+We use the auto emailbox for remind us the expriment process, which requrie a setting.json put in the project directory like following:
+
+{"smtp": "smtp.163.com", "port": 465, "sender": "xxx@163.com", "passport": "YOURPASSWORD", "title": "Mingde Server", "From": "xxxx@163.com", "To": "xxx@qq.com", "Cc": [], "attachment": []}
 
 
-Hardware:
-Current training batch size requires at least 2 GPUs with 12GB each. (Initially trained on Titan V GPUs). For 1 GPU batch size and learning rate should be found in practice and changed accordingly.
+## Dataset
 
-"train", "tier3" and "test" folders from competition dataset should be placed to the current folder.
+You can download the compressed data file from https://www.xview2.org. You should place the uncompressed data folder "train", "tier3", "hold" and "test" into "data" folder in main working diretory.
 
-Use "train.sh" script to train all the models. (~7 days on 2 GPUs).
-To generate predictions/submission file use "predict.sh".
-"evalution-docker-container" folder contains code for docker container used for final evalution on hold out set (CPU version).
+## Data processing
 
-# Trained models
-Trained model weights available here: https://vdurnov.s3.amazonaws.com/xview2_1st_weights.zip
+This part is kept the same as the 1st place solution in xview2 challenge.
 
-(Please Note: the code was developed during the competition and designed to perform separate experiments on different models. So, published as is without additional refactoring to provide fully training reproducibility).
-
-
-# Data Cleaning Techniques
+### Data Cleaning Techniques
 
 Dataset for this competition well prepared and I have not found any problems with it.
 Training masks generated using json files, "un-classified" type treated as "no-damage" (create_masks.py). "masks" folders will be created in "train" and "tier3" folders.
@@ -37,7 +59,7 @@ The problem with different nadirs and small shifts between "pre" and "post" imag
  - Morphological dilation with 5*5 kernel applied to classification masks. Dilated masks made predictions more "bold" - this improved accuracy on borders and also helped with shifts and nadirs.
 
 
-# Data Processing Techniques
+### Data Processing Techniques
 
 Models trained on different crops sizes from (448, 448) for heavy encoder to (736, 736) for light encoder.
 Augmentations used for training:
@@ -51,48 +73,21 @@ Augmentations used for training:
 
 Inference goes on full image size (1024, 1024) with 4 simple test-time augmentations (original, filp left-right, flip up-down, rotation to 180).
 
+## Training part
 
-# Details on Modeling Tools and Techniques
+The folder "train_src" includes the basic training source code for teacher_building model and teacher model, knowledge distillation source code for the ST training the student_building model and student model. The checkpoint will be save into the "weights" folder in the project home directory. However, the major score data will be saved into the mongoDB for analysing and reporting.
 
-All models trained with Train/Validation random split 90%/10% with fixed seeds (3 folds). Only checkpoints from epoches with best validation score used.
+training order:
+0. create_masks
+1. train_teacher_building
+2. tune_teacher_building
+3. train_teahcer
+4. tune_teacher
+5. train_student_building
+6. train_student
 
-For localization models 4 different pretrained encoders used:
-from torchvision.models:
- - ResNet34
-from https://github.com/Cadene/pretrained-models.pytorch:
- - se_resnext50_32x4d
- - SeNet154
- - Dpn92
+## Inference part
 
-Localization models trained on "pre" images, "post" images used in very rare cases as additional augmentation.
-
-Localization training parameters:
-Loss: Dice + Focal
-Validation metric: Dice
-Optimizer: AdamW
-
-Classification models initilized using weights from corresponding localization model and fold number. They are Siamese Neural Networks with whole localization model shared between "pre" and "post" input images. Features from last Decoder layer combined together for classification. Pretrained weights are not frozen.
-Using pretrained weights from localization models allowed to train classification models much faster and to have better accuracy. Features from "pre" and "post" images connected at the very end of the Decoder in bottleneck part, this helping not to overfit and get better generalizing model.
-
-Classification training parameters:
-Loss: Dice + Focal + CrossEntropyLoss. Larger coefficient for CrossEntropyLoss and 2-4 damage classes.
-Validation metric: competition metric
-Optimizer: AdamW
-Sampling: classes 2-4 sampled 2 times to give them more attention.
-
-Almost all checkpoints finally finetuned on full train data for few epoches using low learning rate and less augmentations.
-
-Predictions averaged with equal coefficients for both localization and classification models separately.
-
-Different thresholds for localization used for damaged and undamaged classes (lower for damaged).
+The folder "inference_src" contains the code about converting the pytorch model checkpoint into ONNX format for inference, which is popular in the industry and that's why we use it for our inference time experiments. What's more, some code about get the results from database for reporting also lay here.
 
 
-# Conclusion and Acknowledgments
-
-Thank you to xView2 team for creating and releasing this amazing dataset and opportunity to invent a solution that can help to response to the global natural disasters faster. I really hope it will be usefull and the idea will be improved further.
-
-# References
- - Competition and Dataset: https://www.xview2.org
- - UNet: https://arxiv.org/pdf/1505.04597.pdf
- - Pretrained models for Pytorch: https://github.com/Cadene/pretrained-models.pytorch
- - My 1st place solution from "SpaceNet 4: Off-Nadir Building Footprint Detection Challenge" (some ideas came from here): https://github.com/SpaceNetChallenge/SpaceNet_Off_Nadir_Solutions/tree/master/cannab

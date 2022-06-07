@@ -24,8 +24,8 @@ import time
 eps = 1e-6
 from apex import amp
 
-from adamw import AdamW
-from losses import dice_round, ComboLoss
+from util.adamw import AdamW
+from util.losses import dice_round, ComboLoss
 
 import pandas as pd
 from tqdm import tqdm
@@ -40,23 +40,24 @@ from zoo.models import (
 
 from imgaug import augmenters as iaa
 
-from utils import *
+from util.utils import *
 
 from sklearn.model_selection import train_test_split
 
 from sklearn.metrics import accuracy_score
 
 import gc
-from emailbox import EmailBot
+from util.emailbox import EmailBot
 
 from apex import amp
 
 import argparse
-from mongo_logger import Logger
+from util.mongo_logger import Logger
 
 DB = "building_damage_kd"
 COLLECTION = "v3_loc"
 logger = Logger(DB, COLLECTION)
+
 
 parser = argparse.ArgumentParser()
 parser.add_argument(
@@ -66,8 +67,8 @@ parser.add_argument("--LWF", default=0, choices=[0, 1], type=int)
 parser.add_argument("--LFL", default=0, choices=[0, 1], type=int)
 parser.add_argument("--clsLFL", default=0, choices=[0, 1], type=int)
 parser.add_argument("--KL", default=0, choices=[0, 1], type=int)
-parser.add_argument("--dataset", default="/data1/su/app/xview2/building_damage_kd/")
-parser.add_argument("--checkpoint_path", default="weights")
+parser.add_argument("--dataset", default="../data")
+parser.add_argument("--checkpoint_path", default="../weights")
 parser.add_argument("--seed", default=1, type=int)
 parser.add_argument("--vis_dev", default=0, type=int)
 parser.add_argument("--batch_size", default=8, type=int)
@@ -95,7 +96,7 @@ logger.add_attr("m", args.m, "info")
 logger.add_attr("weight_decay", args.weight_decay, "info")
 logger.insert_into_db("info")
 
-emailbot = EmailBot("settings.json")
+emailbot = EmailBot("../settings.json")
 emailbot.sendOne(
     {
         "title": "显卡%s训练任务开始训练loc" % args.vis_dev,
@@ -312,7 +313,7 @@ def evaluate_val_kd(args, data_val, best_score, model, snapshot_name, current_ep
         )
         best_score = d
 
-    emailbot = EmailBot("settings.json")
+    emailbot = EmailBot("../settings.json")
     emailbot.sendOne(
         {
             "title": "显卡%s训练任务进行epoch=%s的测试" % (args.vis_dev, current_epoch),
@@ -691,7 +692,7 @@ if __name__ == "__main__":
 
     elapsed = timeit.default_timer() - t0
     print("Time: {:.3f} min".format(elapsed / 60))
-    emailbot = EmailBot("settings.json")
+    emailbot = EmailBot("../settings.json")
     emailbot.sendOne(
         {"title": "显卡%s训练任务完成" % args.vis_dev, "content": "最佳分数%s" % best_score}
     )
