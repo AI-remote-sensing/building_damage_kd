@@ -1,0 +1,1 @@
+python train50_cls_cce-KD.py --vis_dev 3 --mode T-S --transfer 1 --LWF 1 --LFL 1 --alpha 0 --beta 1

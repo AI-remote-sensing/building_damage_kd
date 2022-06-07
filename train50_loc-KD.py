@@ -55,7 +55,7 @@ import argparse
 from mongo_logger import Logger
 
 DB = "building_damage_kd"
-COLLECTION = "v2_loc"
+COLLECTION = "v3_loc"
 logger = Logger(DB, COLLECTION)
 
 parser = argparse.ArgumentParser()

@@ -1,0 +1,1 @@
+python train50_loc-KD.py --vis_dev 0 --mode T-S --LWF 1 --LFL 1 --alpha 0 --beta 1

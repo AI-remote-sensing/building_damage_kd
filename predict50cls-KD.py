@@ -18,7 +18,7 @@ from tqdm import tqdm
 import timeit
 import cv2
 
-from zoo.models import SeResNext50_Unet_Double
+from zoo.models import SeResNext50_Unet_Double_KD
 
 from utils import *
 
@@ -32,13 +32,13 @@ models_folder = "weights"
 if __name__ == "__main__":
     t0 = timeit.default_timer()
 
-    seed = int(sys.argv[1])
     # vis_dev = sys.argv[2]
 
     # os.environ['CUDA_DEVICE_ORDER'] = 'PCI_BUS_ID'
     # os.environ["CUDA_VISIBLE_DEVICES"] = vis_dev
 
-    pred_folder = "res50cls_cce_{}_tuned".format(seed)
+    # pred_folder = "cls_KD_1610592762_best_best"
+    pred_folder = "cls_KD_12222"
     makedirs(pred_folder, exist_ok=True)
 
     # cudnn.benchmark = True
@@ -46,10 +46,10 @@ if __name__ == "__main__":
     models = []
 
     # for seed in [1]:
-    snap_to_load = "res50_cls_cce_{}_tuned_best".format(seed)
+    snap_to_load = "cls_KD_1610592762_best_best"
 
-    model = SeResNext50_Unet_Double().cuda()
-    model = nn.DataParallel(model).cuda()
+    model = SeResNext50_Unet_Double_KD().cuda()
+    # model = nn.DataParallel(model).cuda()
     # TODO(sujinhua): change the model mode into kd mode
 
     print("=> loading checkpoint '{}'".format(snap_to_load))
@@ -93,9 +93,7 @@ if __name__ == "__main__":
 
                 pred = []
                 for model in models:
-                    msk = model(
-                        inp
-                    )  # There may be some thing different from the baseline models
+                    msk = model(inp)
                     msk = torch.softmax(msk[:, :, ...], dim=1)
                     msk = msk.cpu().numpy()
 

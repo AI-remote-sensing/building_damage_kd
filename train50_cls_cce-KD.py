@@ -52,7 +52,7 @@ from emailbox import EmailBot
 from mongo_logger import Logger
 
 DB = "building_damage_kd"
-COLLECTION = "v2_cls"
+COLLECTION = "v3_cls"
 logger = Logger(DB,COLLECTION)
 
 parser = argparse.ArgumentParser()
@@ -403,11 +403,11 @@ def validate(model, data_loader):
                     fp[c] += np.logical_and(pred == c, targ != c).sum()
 
     logger.insert_into_db("time_difference")
-    d0 = 2 * tp[4] / (2 * tp[4] + fp[4] + fn[4])
+    d0 = 2 * tp[4] / (2 * tp[4] + fp[4] + fn[4]) # loc segmentation f1 two class
 
     f1_sc = np.zeros((4,))
     for c in range(4):
-        f1_sc[c] = 2 * tp[c] / (2 * tp[c] + fp[c] + fn[c])
+        f1_sc[c] = 2 * tp[c] / (2 * tp[c] + fp[c] + fn[c])  # mutli-class f1 for four class
 
     f1 = 4 / np.sum(1.0 / (f1_sc + 1e-6))
 
